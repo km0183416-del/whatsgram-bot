@@ -1,0 +1,12 @@
+{
+  "name": "whatsgram-automation-engine",
+  "version": "2.0.0",
+  "description": "24/7 Live Automation Engine for WhatsGram",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "firebase": "^10.8.0"
+  }
+}
