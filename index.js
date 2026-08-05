@@ -27,7 +27,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
-// 3. Groq API Configuration (Updated)
+// 3. Groq API Configuration
 const GROQ_API_KEY = "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"; 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -73,7 +73,16 @@ let isInitialUsersLoad = true;
 // 🧠 IN-MEMORY CHAT HISTORY (Groq/OpenAI Format: {role, content})
 const chatHistoryCache = new Map();
 
-// Helper: Random Delay (Simulates Human Typing Time)
+// Fallback Messages Jab API Fail Ya Error Ho Jaye
+const errorFallbackTemplates = [
+    "Baby baad me baat karti hoon 🥺",
+    "Jaan abhi thoda busy hoon, thodi der me baat karti hoon na 💕",
+    "Babu network issue ho raha hai shayad, thodi der me message karti hoon 😘",
+    "Uff mera phone hang ho raha hai jaan, 2 min me aati hoon 🥺❤️",
+    "Suno abhi thoda kaam hai, baad me baat karte hain na babu ✨"
+];
+
+// Helper Functions
 function calculateTypingDelay(messageText) {
     const baseDelay = 1500; 
     const charDelay = messageText.length * 40; 
@@ -94,6 +103,7 @@ console.log(`[${getTimestamp()}] ⚡ Starting WhatsGram GROQ AI Engine...`);
 db.collection("models").onSnapshot((snapshot) => {
     registeredModels = [];
     snapshot.forEach((doc) => registeredModels.push(doc.id));
+    console.log(`[${getTimestamp()}] 📋 Registered Models Synced (${registeredModels.length}):`, registeredModels);
 }, (err) => console.error(`Models Sync Error: ${err.message}`));
 
 // 5. PROACTIVE: New User Signup Listener (Multi-Model Dispatcher)
@@ -138,7 +148,6 @@ db.collection("users").onSnapshot((snapshot) => {
                             time: Date.now()
                         });
                         
-                        // History me welcome message dal do (Groq Format)
                         const cacheKey = `${userId}_${modelId}`;
                         if (!chatHistoryCache.has(cacheKey)) {
                             chatHistoryCache.set(cacheKey, []);
@@ -160,6 +169,7 @@ db.collection("messages").onSnapshot(async (snapshot) => {
     if (isInitialMessagesLoad) {
         snapshot.forEach((doc) => processedMessageIds.add(doc.id));
         isInitialMessagesLoad = false;
+        console.log(`[${getTimestamp()}] 🚀 Initial messages loaded. Waiting for new messages...`);
         return;
     }
 
@@ -170,14 +180,20 @@ db.collection("messages").onSnapshot(async (snapshot) => {
             processedMessageIds.add(docId);
 
             const data = change.doc.data();
-            const senderId = data.senderId || data.sender;
-            const receiverId = data.receiverId || data.receiver;
-            const messageText = data.text || data.message;
+            const senderId = String(data.senderId || data.sender || "");
+            const receiverId = String(data.receiverId || data.receiver || "");
+            const messageText = data.text || data.message || "";
 
-            if (!registeredModels.includes(receiverId)) return;
+            console.log(`[DEBUG] Firebase Message Detected -> Sender: "${senderId}", Receiver: "${receiverId}", Text: "${messageText}"`);
+
+            // Ignore messages not addressed to registered models or sent by registered models
+            if (!registeredModels.includes(receiverId)) {
+                console.log(`[DEBUG] ❌ Skipped: Receiver ID "${receiverId}" is not in registered models list:`, registeredModels);
+                return;
+            }
             if (registeredModels.includes(senderId)) return;
 
-            const modelId = receiverId; // Ye modelId dynamically prompt me use hoga
+            const modelId = receiverId;
             const userId = senderId;
             const cacheKey = `${userId}_${modelId}`;
 
@@ -186,7 +202,7 @@ db.collection("messages").onSnapshot(async (snapshot) => {
             }
 
             const history = chatHistoryCache.get(cacheKey);
-            history.push({ role: "user", content: messageText }); // Groq Format
+            history.push({ role: "user", content: messageText });
 
             console.log(`[${getTimestamp()}] 📩 Message received from ${userId} for model ${modelId}: "${messageText}"`);
 
@@ -194,9 +210,8 @@ db.collection("messages").onSnapshot(async (snapshot) => {
                 const typingDelay = calculateTypingDelay(messageText);
                 await new Promise(resolve => setTimeout(resolve, typingDelay));
 
-                // Prepare API Payload with Dynamic System Prompt
                 const apiMessages = [
-                    { role: "system", content: getSystemPrompt(modelId) }, // Dynamic Name Injected
+                    { role: "system", content: getSystemPrompt(modelId) },
                     ...history
                 ];
 
@@ -207,40 +222,65 @@ db.collection("messages").onSnapshot(async (snapshot) => {
                         'Content-Type': 'application/json' 
                     },
                     body: JSON.stringify({ 
-                        model: "llama3-70b-8192", // Fast and capable Groq Model
+                        model: "llama3-70b-8192", 
                         messages: apiMessages,
                         temperature: 0.7,
-                        max_tokens: 150 // Limits long paragraphs
+                        max_tokens: 150
                     })
                 });
 
                 const result = await response.json();
-                
-                if (response.ok && result.choices && result.choices.length > 0) {
-                    const aiReply = result.choices[0].message.content;
-                    
-                    history.push({ role: "assistant", content: aiReply });
+                let aiReply = "";
 
+                if (response.ok && result.choices && result.choices.length > 0 && result.choices[0].message) {
+                    aiReply = result.choices[0].message.content;
+                } else {
+                    console.error(`[${getTimestamp()}] ❌ Groq API Error Response:`, JSON.stringify(result));
+                    // Pick random fallback message on API failure
+                    aiReply = getRandomItem(errorFallbackTemplates);
+                }
+
+                history.push({ role: "assistant", content: aiReply });
+
+                await db.collection("messages").add({
+                    senderId: String(modelId),
+                    receiverId: String(userId),
+                    sender: String(modelId),
+                    receiver: String(userId),
+                    text: aiReply,
+                    message: aiReply,
+                    type: "text",
+                    read: false,
+                    isRead: false,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    time: Date.now()
+                });
+
+                console.log(`[${getTimestamp()}] 🤖 Reply sent from ${modelId} to ${userId}: "${aiReply}"`);
+
+            } catch (err) {
+                console.error(`[${getTimestamp()}] ❌ Exception during AI Reply Handler: ${err.message}`);
+                
+                // Fallback message when network/script exception happens
+                const fallbackReply = getRandomItem(errorFallbackTemplates);
+                try {
                     await db.collection("messages").add({
                         senderId: String(modelId),
                         receiverId: String(userId),
                         sender: String(modelId),
                         receiver: String(userId),
-                        text: aiReply,
-                        message: aiReply,
+                        text: fallbackReply,
+                        message: fallbackReply,
                         type: "text",
                         read: false,
                         isRead: false,
                         timestamp: firebase.firestore.FieldValue.serverTimestamp(),
                         time: Date.now()
                     });
-
-                    console.log(`[${getTimestamp()}] 🤖 AI Reply sent from ${modelId} to ${userId}: "${aiReply}"`);
-                } else {
-                    console.error(`[${getTimestamp()}] ❌ Groq API Error:`, JSON.stringify(result));
+                    console.log(`[${getTimestamp()}] ⚠️ Fallback Error Message sent from ${modelId} to ${userId}: "${fallbackReply}"`);
+                } catch (dbErr) {
+                    console.error(`[${getTimestamp()}] ❌ Failed to write fallback message: ${dbErr.message}`);
                 }
-            } catch (err) {
-                console.error(`[${getTimestamp()}] ❌ AI Handler Error: ${err.message}`);
             }
         }
     });
