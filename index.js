@@ -213,7 +213,7 @@ db.collection("messages").onSnapshot(async (snapshot) => {
                         'Content-Type': 'application/json' 
                     },
                     body: JSON.stringify({ 
-                        model: "llama3-70b-8192", 
+                        model: "llama-3.3-70b-versatile", // ✅ Updated Model
                         messages: apiMessages,
                         temperature: 0.7,
                         max_tokens: 150
