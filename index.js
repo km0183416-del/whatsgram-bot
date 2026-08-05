@@ -28,7 +28,7 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
 // 3. Groq API Configuration
-const GROQ_API_KEY = "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"; 
+const GROQ_API_KEY = "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"; 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 // Dynamic Prompt Generator - Har model ka apna naam hoga
