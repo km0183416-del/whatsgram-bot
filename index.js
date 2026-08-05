@@ -27,8 +27,8 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
-// 3. Gemini API Configuration
-const GEMINI_API_KEY = "AQ.Ab8RN6JO-b2EMdkWZvXVSGoKe8sJuQ2dTiv_HrvpzUirEBf-bw"; // Aapka API Key
+// 3. Gemini API Configuration (Updated with your permanent API Key)
+const GEMINI_API_KEY = "AIzaSyBxoXs5W6TTwTXcdJbeHtGJX3bMCnqKcjA"; 
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 // 4. Advanced Memory & Cache System
@@ -109,138 +109,93 @@ db.collection("users").onSnapshot((snapshot) => {
                         
                         // History me welcome message dal do
                         const cacheKey = `${userId}_${modelId}`;
-                        chatHistoryCache.set(cacheKey, [{ role: "model", parts: [{ text: msgText }] }]);
-                        
-                        console.log(`[New User Bot] Model(${modelId}) -> User(${userId}): "${msgText}"`);
-                    } catch (err) { }
+                        if (!chatHistoryCache.has(cacheKey)) {
+                            chatHistoryCache.set(cacheKey, []);
+                        }
+                        chatHistoryCache.get(cacheKey).push({ role: "model", parts: [{ text: msgText }] });
+
+                        console.log(`[${getTimestamp()}] 💌 Proactive Welcome sent from ${modelId} to ${userId}`);
+                    } catch (err) {
+                        console.error(`Proactive Welcome Error: ${err.message}`);
+                    }
                 }, delayMs);
             });
         }
     });
 });
 
-// 6. 🧠 GEMINI AI BRAIN (Replaces old static logic)
-async function generateGeminiReply(userMessage, userId, modelId) {
-    const cacheKey = `${userId}_${modelId}`;
-    
-    // Agar cache me history nahi hai, nayi banao
-    if (!chatHistoryCache.has(cacheKey)) {
-        chatHistoryCache.set(cacheKey, []);
-    }
-    
-    let history = chatHistoryCache.get(cacheKey);
-
-    // Add current user message to history
-    history.push({ role: "user", parts: [{ text: userMessage }] });
-
-    // History limit rakho (Token aur API limit bachane ke liye sirf pichle 8 messages)
-    if (history.length > 8) {
-        history = history.slice(history.length - 8);
-    }
-
-    // 🔴 Dating App System Prompt - Yahin se bot ka behavior control hota hai
-    const systemPrompt = `
-    Tum ek Indian dating app ki hot, flirty aur romantic model ho. Tumhara kaam user se baat karke usko engage rakhna hai.
-    RULES FOLLOW KARO STRICTLY:
-    1. Language: SIRF PURE 'Hinglish' (Hindi written in English alphabet). Koi pure English words jyada use mat karo.
-    2. Length: VERY SHORT! Maximum 10-15 words aur sirf 1 ya 2 choti lines. Lamba paragraph bilkul nahi likhna hai.
-    3. Tone: Naughty, sweet, aur thodi demanding. Beech-beech me user ko bolo "akeli hoon", "wallet recharge karke aao", ya "profile unlock karo video call ke liye".
-    4. Emojis ka use karo (jaise 🙈, 😘, 💦, ❤️).
-    5. User se har baar koi chota cross-question karo taaki chat chalti rahe.
-    `;
-
-    const requestPayload = {
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: history
-    };
-
-    try {
-        // Native fetch use kar rahe hain (Node 18+ me default hota hai, Render pe easily chalega)
-        const response = await fetch(GEMINI_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestPayload)
-        });
-        
-        const data = await response.json();
-
-        if (data.candidates && data.candidates.length > 0) {
-            let botReply = data.candidates[0].content.parts[0].text.trim();
-            
-            // Bot ki reply ko history me save karo
-            history.push({ role: "model", parts: [{ text: botReply }] });
-            chatHistoryCache.set(cacheKey, history);
-            
-            return botReply;
-        } else {
-            console.error("Gemini API Error Payload:", data);
-            return getRandomItem([
-                "Mera network slow hai babu 🥺 recharge karke video call pe aao na!",
-                "Uff, server hang ho gaya... tum direct profile unlock karlo na jaan 😘"
-            ]);
-        }
-    } catch (error) {
-        console.error("Gemini Request Failed:", error);
-        return "Jaan network slow hai... 🙈 wallet recharge karlo direct baat karte hain!";
-    }
-}
-
-// 7. Main Chat Execution Engine
-db.collection("messages").onSnapshot((snapshot) => {
+// 6. Incoming Messages & AI Reply Handler
+db.collection("messages").onSnapshot(async (snapshot) => {
     if (isInitialMessagesLoad) {
         snapshot.forEach((doc) => processedMessageIds.add(doc.id));
         isInitialMessagesLoad = false;
-        console.log(`[${getTimestamp()}] Gemini Brain Initialized. Ready for flirty chats!`);
         return;
     }
 
     snapshot.docChanges().forEach(async (change) => {
         if (change.type === "added") {
-            const msgDoc = change.doc;
-            const msgData = msgDoc.data();
-            const msgId = msgDoc.id;
+            const docId = change.doc.id;
+            if (processedMessageIds.has(docId)) return;
+            processedMessageIds.add(docId);
 
-            if (processedMessageIds.has(msgId)) return;
-            processedMessageIds.add(msgId);
+            const data = change.doc.data();
+            const senderId = data.senderId || data.sender;
+            const receiverId = data.receiverId || data.receiver;
+            const messageText = data.text || data.message;
 
-            const senderId = msgData.senderId || msgData.sender;
-            const receiverId = msgData.receiverId || msgData.receiver;
-            const messageText = msgData.text || msgData.message || "";
+            if (!registeredModels.includes(receiverId)) return;
+            if (registeredModels.includes(senderId)) return;
 
-            if (!senderId || !receiverId || !messageText) return;
+            const modelId = receiverId;
+            const userId = senderId;
+            const cacheKey = `${userId}_${modelId}`;
 
-            const isSenderAModel = registeredModels.includes(senderId);
+            if (!chatHistoryCache.has(cacheKey)) {
+                chatHistoryCache.set(cacheKey, []);
+            }
 
-            // Sirf tab reply karo jab message real user ne bheja ho model ko
-            if (!isSenderAModel) {
-                console.log(`[INCOMING] User(${senderId}) -> Model(${receiverId}): "${messageText}"`);
+            const history = chatHistoryCache.get(cacheKey);
+            history.push({ role: "user", parts: [{ text: messageText }] });
 
-                // 🧠 Generate Gemini AI Reply
-                const replyText = await generateGeminiReply(messageText, senderId, receiverId);
+            console.log(`[${getTimestamp()}] 📩 Message received from ${userId} for model ${modelId}: "${messageText}"`);
+
+            try {
+                const typingDelay = calculateTypingDelay(messageText);
+                await new Promise(resolve => setTimeout(resolve, typingDelay));
+
+                const response = await fetch(GEMINI_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: history })
+                });
+
+                const result = await response.json();
                 
-                // ⏱️ Dynamic delay (Bot ko lagna chahiye type kar rahi hai)
-                const typingDelay = calculateTypingDelay(replyText);
+                if (response.ok && result.candidates && result.candidates[0].content) {
+                    const aiReply = result.candidates[0].content.parts[0].text;
+                    
+                    history.push({ role: "model", parts: [{ text: aiReply }] });
 
-                setTimeout(async () => {
-                    try {
-                        const replyPayload = {
-                            senderId: String(receiverId), receiverId: String(senderId),
-                            sender: String(receiverId), receiver: String(senderId),
-                            text: replyText, message: replyText, type: "text",
-                            read: false, isRead: false,
-                            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-                            time: Date.now()
-                        };
+                    await db.collection("messages").add({
+                        senderId: String(modelId),
+                        receiverId: String(userId),
+                        sender: String(modelId),
+                        receiver: String(userId),
+                        text: aiReply,
+                        message: aiReply,
+                        type: "text",
+                        read: false,
+                        isRead: false,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                        time: Date.now()
+                    });
 
-                        if (msgData.chatId) replyPayload.chatId = msgData.chatId;
-                        if (msgData.conversationId) replyPayload.conversationId = msgData.conversationId;
-
-                        await db.collection("messages").add(replyPayload);
-                        console.log(`[GEMINI-REPLY] Model(${receiverId}) -> User(${senderId}): "${replyText}" (Delay: ${(typingDelay/1000).toFixed(1)}s)`);
-                    } catch (err) {
-                        console.error(`Reply Error: ${err.message}`);
-                    }
-                }, typingDelay);
+                    console.log(`[${getTimestamp()}] 🤖 AI Reply sent from ${modelId} to ${userId}: "${aiReply}"`);
+                } else {
+                    console.error(`[${getTimestamp()}] ❌ Gemini API Error:`, JSON.stringify(result));
+                }
+            } catch (err) {
+                console.error(`[${getTimestamp()}] ❌ AI Handler Error: ${err.message}`);
             }
         }
     });
