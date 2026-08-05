@@ -1,3 +1,14 @@
+// 1. Dummy HTTP Server - Render.com ki Port Requirement puri karne ke liye
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('WhatsGram Automation Engine is Running Live 24/7!');
+}).listen(PORT, () => {
+    console.log(`[Server] Web service is listening on port ${PORT}`);
+});
+
+// 2. Firebase Setup (Fixed 'Const' to 'const')
 const firebase = require("firebase/compat/app");
 require("firebase/compat/firestore");
 
