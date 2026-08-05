@@ -73,15 +73,6 @@ let isInitialUsersLoad = true;
 // 🧠 IN-MEMORY CHAT HISTORY (Groq/OpenAI Format: {role, content})
 const chatHistoryCache = new Map();
 
-// Fallback Messages Jab API Fail Ya Error Ho Jaye
-const errorFallbackTemplates = [
-    "Baby baad me baat karti hoon 🥺",
-    "Jaan abhi thoda busy hoon, thodi der me baat karti hoon na 💕",
-    "Babu network issue ho raha hai shayad, thodi der me message karti hoon 😘",
-    "Uff mera phone hang ho raha hai jaan, 2 min me aati hoon 🥺❤️",
-    "Suno abhi thoda kaam hai, baad me baat karte hain na babu ✨"
-];
-
 // Helper Functions
 function calculateTypingDelay(messageText) {
     const baseDelay = 1500; 
@@ -236,8 +227,10 @@ db.collection("messages").onSnapshot(async (snapshot) => {
                     aiReply = result.choices[0].message.content;
                 } else {
                     console.error(`[${getTimestamp()}] ❌ Groq API Error Response:`, JSON.stringify(result));
-                    // Pick random fallback message on API failure
-                    aiReply = getRandomItem(errorFallbackTemplates);
+                    
+                    // SENDING EXACT API ERROR TO MESSAGE INSTEAD OF FALLBACK
+                    const errorMessage = result.error?.message || JSON.stringify(result) || "Unknown API Error";
+                    aiReply = `[Groq API Error]: ${errorMessage}`;
                 }
 
                 history.push({ role: "assistant", content: aiReply });
@@ -261,25 +254,26 @@ db.collection("messages").onSnapshot(async (snapshot) => {
             } catch (err) {
                 console.error(`[${getTimestamp()}] ❌ Exception during AI Reply Handler: ${err.message}`);
                 
-                // Fallback message when network/script exception happens
-                const fallbackReply = getRandomItem(errorFallbackTemplates);
+                // SENDING EXACT SYSTEM ERROR TO MESSAGE INSTEAD OF FALLBACK
+                const exactErrorMsg = `[System Error]: ${err.message}`;
+                
                 try {
                     await db.collection("messages").add({
                         senderId: String(modelId),
                         receiverId: String(userId),
                         sender: String(modelId),
                         receiver: String(userId),
-                        text: fallbackReply,
-                        message: fallbackReply,
+                        text: exactErrorMsg,
+                        message: exactErrorMsg,
                         type: "text",
                         read: false,
                         isRead: false,
                         timestamp: firebase.firestore.FieldValue.serverTimestamp(),
                         time: Date.now()
                     });
-                    console.log(`[${getTimestamp()}] ⚠️ Fallback Error Message sent from ${modelId} to ${userId}: "${fallbackReply}"`);
+                    console.log(`[${getTimestamp()}] ⚠️ Exact Error Message sent from ${modelId} to ${userId}: "${exactErrorMsg}"`);
                 } catch (dbErr) {
-                    console.error(`[${getTimestamp()}] ❌ Failed to write fallback message: ${dbErr.message}`);
+                    console.error(`[${getTimestamp()}] ❌ Failed to write error message to DB: ${dbErr.message}`);
                 }
             }
         }
