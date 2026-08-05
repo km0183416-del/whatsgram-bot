@@ -1,4 +1,4 @@
-// 1. Dummy HTTP Server - Render.com ki Port Requirement puri karne ke liye
+// . Dummy HTTP Server - Render.com ki Port Requirement puri karne ke liye
 const http = require('http');
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
