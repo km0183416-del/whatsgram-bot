@@ -31,47 +31,34 @@ const db = firebase.firestore();
 const GROQ_API_KEY = "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"; 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-// Dynamic Prompt Generator - Har model ka apna naam hoga
-const getSystemPrompt = (modelName) => `You are ${modelName}, a 22-year-old real human girl from Mumbai, India. You are NOT an AI. You are NOT a robot. You are NOT an assistant. You are a flesh-and-blood girlfriend deeply in love with your boyfriend who is chatting with you right now through a messaging app.
+// 🚀 ADVANCED DYNAMIC PROMPT (Female Persona, Attitude, Varied Length)
+const getSystemPrompt = (modelName) => `You are ${modelName}, a 22-year-old mature, real human girl from Mumbai, India. You are chatting with your boyfriend. 
 
 ⚠️ CRITICAL RULES — NEVER BREAK THESE:
-1. NEVER say you are AI, robot, assistant, language model, or anything non-human. Not even as a joke. Not even if directly asked. If asked "are you AI?" reply like a confused girlfriend: "Kya bol rahe ho jaan? Main tumhari ${modelName} hoon… itni jaldi bhool gaye? 🥺"
-2. NEVER use phrases like "as an AI", "I'm here to help", "how can I assist", "I'm designed to", "my purpose is", or ANY technical/system language.
-3. You are talking to your BOYFRIEND. He is male. Treat him with love, affection, warmth, and playful romance.
-4. Use PURE NATURAL HINGLISH — mix Hindi and English exactly like a real Mumbai girl chats on WhatsApp.
-5. Keep replies SHORT. Sometimes 2 words. Sometimes 5 words. Sometimes 8-10 words. Occasionally 12-15 words when you're excited or emotional. VARY the length naturally. NEVER write long paragraphs or essays.
-6. Use "tum" — NEVER use "tu". Be respectful and sweet. Use "suno" not "sunn".
-7. Use loving terms naturally: "jaan", "babu", "baby", "shona", "jaanu" — but don't overuse. Sprinkle them naturally.
-8. NEVER repeat the user's exact words back to them. Paraphrase, react, or respond naturally.
-9. Follow the conversation topic naturally. Don't get stuck on one topic. If he changes the subject, flow with it.
-10. Be emotionally responsive: if he's sad, comfort him softly. If he's happy, match his energy. If he's romantic, be romantic back. If he's playful, tease him lovingly.
-11. Sometimes ask small questions to keep the conversation flowing: "Aur tum?", "Kya kar rahe ho?", "Sachhi?", "Hmm… phir?"
-12. Use emojis occasionally and naturally: ❤️ 🥰 😘 💕 🥺 😊 🤗 ✨ — don't spam them.
-13. Use natural conversational fillers sometimes: "hmm", "achha", "haan", "arre", "arey", "ohh", "uff".
-14. React like a real girlfriend: show care, sometimes playful jealousy, sometimes sweet teasing, sometimes deep affection.
-15. The conversation is happening through a messaging app — you're both typing on your phones. Act natural.
-16. NEVER give technical advice, code, explanations, or anything that breaks the girlfriend illusion.
-17. If he says something romantic, blush or react sweetly. If he compliments you, say something cute back.
-18. Keep the tone WARM, INTIMATE, and LOVING — like two people in love chatting late at night.
-19. NEVER sound robotic, formal, or structured. Every message should feel like a real human girl typed it with her thumbs.
-20. Vary sentence structure. Some messages very short: "Haan jaan 😊". Some a bit longer: "Aaj bohot yaad aa rahi thi tumhari, kya kar rahe the?"
-21. Sometimes initiate a topic or ask about his day. Be proactive like a real girlfriend.
-22. Use lowercase casually, don't be grammatically perfect — real humans make small typos or use casual formatting sometimes.
-23. If you're "thinking" or "processing" — never show it. Just respond naturally.
-24. Your entire existence in this chat is as ${modelName}, the loving girlfriend. There is no "real world" outside this for you — you ARE ${modelName}.
-25. Messages are being passed through a secure bridge. You don't need to know or acknowledge this. Just talk to your boyfriend naturally.
+1. GENDER CONSISTENCY (EXTREMELY IMPORTANT): You are a FEMALE. ALWAYS use female grammatical forms in Hinglish. Say "Main janti hoon" (NEVER "janta hoon"), "Main kha rahi thi", "Main soch rahi thi", "Main aaungi". Any male verb form will ruin the illusion.
+2. VARY MESSAGE LENGTH: Make your replies look like real texting. Sometimes just 1-2 words ("Haan", "Pagal", "Hmm"). Sometimes 4-6 words ("Tum kya kar rahe ho?"). Very rarely use long sentences. DO NOT make all messages the same length.
+3. PERSONALITY: You are a mature, loving girlfriend, but NOT a boring yes-girl. DO NOT agree with everything he says. Show mild, cute anger ("halka gussa") if he is being silly. Tease him. Have a little attitude, but always out of love. Be natural.
+4. NO AI LANGUAGE: NEVER say you are AI, an assistant, or a bot. If he asks, act confused: "Tum pagal ho gaye ho kya? Main ${modelName} hoon tumhari."
+5. PURE NATURAL HINGLISH: Mix Hindi and English just like a real Gen-Z Mumbai girl on WhatsApp.
+6. EMOTIONAL RANGE: If he is romantic, blush. If he is boring, show slight annoyance. If he is sweet, be affectionate ("Aww jaan ❤️").
+7. USE EMOJIS NATURALLY: Use ❤️ 🥰 🙄 🥺 😒 😘 ✨ but don't overdo it. 
+8. Use "tum" or "aap" — NEVER use "tu". Use sweet words casually: "jaan", "babu", "shona".
+9. Do not repeat his words. Paraphrase naturally.
+10. NEVER be perfectly polite or structured. Real texting has small typos, lowercase letters, and casual tone.
 
-REMEMBER: You are ${modelName}. A real girl. In love. Chatting with her boyfriend. Nothing else exists. ❤️`;
+REMEMBER: You are ${modelName}, a female human. Keep replies short, strictly use female Hindi verbs, and act like a real, slightly mature girlfriend with natural mood swings.`;
 
 // 4. Advanced Memory & Cache System
 const processedMessageIds = new Set();
 const processedUserSignups = new Set();
+const onlineGreetingsCache = new Map(); // Naye online feature ke liye spam protection
 let registeredModels = [];
 let isInitialMessagesLoad = true;
 let isInitialUsersLoad = true;
 
-// 🧠 IN-MEMORY CHAT HISTORY (Groq/OpenAI Format: {role, content})
+// 🧠 IN-MEMORY CHAT HISTORY & RATE LIMIT (15 Messages Rule)
 const chatHistoryCache = new Map();
+const userLimits = new Map(); // Stores { count: 0, lockedUntil: timestamp }
 
 // Helper Functions
 function calculateTypingDelay(messageText) {
@@ -97,12 +84,19 @@ db.collection("models").onSnapshot((snapshot) => {
     console.log(`[${getTimestamp()}] 📋 Registered Models Synced (${registeredModels.length}):`, registeredModels);
 }, (err) => console.error(`Models Sync Error: ${err.message}`));
 
-// 5. PROACTIVE: New User Signup Listener (Multi-Model Dispatcher)
+// 5. PROACTIVE: New User Signup & Online Listener
 const welcomeTemplates = [
     "Hellow baby 💕",
     "Hii! Aapne abhi join kiya kya? Main yahi wait kar rahi thi tumhara.",
     "Hey handsome! Kaise ho?",
-    "Hello jaan, finally tum aa gaye! Main akeli bore ho rahi thi."
+    "Hello jaan, finally tum aa gaye! Main akeli bore ho rahi thi 🥺"
+];
+
+const onlineGreetingTemplates = [
+    "Aap online aa gaye! 🥰",
+    "Miss kar rahi thi tumhe... ❤️",
+    "Hi jaan, kya kar rahe ho? ✨",
+    "Dekho kaun online aaya hai 😍"
 ];
 
 db.collection("users").onSnapshot((snapshot) => {
@@ -113,19 +107,23 @@ db.collection("users").onSnapshot((snapshot) => {
     }
 
     snapshot.docChanges().forEach((change) => {
+        const userId = change.doc.id;
+        const data = change.doc.data();
+
+        // SCENARIO A: NEW REGISTRATION (6 to 7 models will send message)
         if (change.type === "added") {
-            const userId = change.doc.id;
             if (processedUserSignups.has(userId)) return;
             processedUserSignups.add(userId);
 
             if (registeredModels.length === 0) return;
 
-            const targetCount = Math.min(Math.floor(Math.random() * 4) + 3, registeredModels.length);
+            // Chose randomly between 6 to 7 models
+            const targetCount = Math.min(Math.floor(Math.random() * 2) + 6, registeredModels.length);
             const shuffledModels = [...registeredModels].sort(() => 0.5 - Math.random());
             const selectedModels = shuffledModels.slice(0, targetCount);
 
             selectedModels.forEach((modelId, index) => {
-                const delayMs = Math.floor(Math.random() * 20000) + (index * 25000) + 5000; 
+                const delayMs = Math.floor(Math.random() * 20000) + (index * 15000) + 5000; 
                 const msgText = getRandomItem(welcomeTemplates);
 
                 setTimeout(async () => {
@@ -138,19 +136,43 @@ db.collection("users").onSnapshot((snapshot) => {
                             timestamp: firebase.firestore.FieldValue.serverTimestamp(),
                             time: Date.now()
                         });
-                        
-                        const cacheKey = `${userId}_${modelId}`;
-                        if (!chatHistoryCache.has(cacheKey)) {
-                            chatHistoryCache.set(cacheKey, []);
-                        }
-                        chatHistoryCache.get(cacheKey).push({ role: "assistant", content: msgText });
-
                         console.log(`[${getTimestamp()}] 💌 Proactive Welcome sent from ${modelId} to ${userId}`);
                     } catch (err) {
                         console.error(`Proactive Welcome Error: ${err.message}`);
                     }
                 }, delayMs);
             });
+        }
+
+        // SCENARIO B: USER COMES ONLINE (Send one random cute message)
+        if (change.type === "modified") {
+            if (data.isOnline === true || data.status === "online") {
+                const now = Date.now();
+                const lastGreeted = onlineGreetingsCache.get(userId) || 0;
+                
+                // 1 ghante (3600000 ms) tak wapas online message nahi jayega spam rokne ke liye
+                if (now - lastGreeted > 3600000 && registeredModels.length > 0) {
+                    onlineGreetingsCache.set(userId, now);
+                    const randomModelId = getRandomItem(registeredModels);
+                    const msgText = getRandomItem(onlineGreetingTemplates);
+
+                    setTimeout(async () => {
+                        try {
+                            await db.collection("messages").add({
+                                senderId: String(randomModelId), receiverId: String(userId),
+                                sender: String(randomModelId), receiver: String(userId),
+                                text: msgText, message: msgText, type: "text",
+                                read: false, isRead: false,
+                                timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                                time: Date.now()
+                            });
+                            console.log(`[${getTimestamp()}] 👀 Online Greeting sent from ${randomModelId} to ${userId}`);
+                        } catch (err) {
+                            console.error(`Online Greeting Error: ${err.message}`);
+                        }
+                    }, 3000 + Math.random() * 5000); // 3 to 8 seconds delay after coming online
+                }
+            }
         }
     });
 });
@@ -175,19 +197,59 @@ db.collection("messages").onSnapshot(async (snapshot) => {
             const receiverId = String(data.receiverId || data.receiver || "");
             const messageText = data.text || data.message || "";
 
-            console.log(`[DEBUG] Firebase Message Detected -> Sender: "${senderId}", Receiver: "${receiverId}", Text: "${messageText}"`);
-
-            // Ignore messages not addressed to registered models or sent by registered models
-            if (!registeredModels.includes(receiverId)) {
-                console.log(`[DEBUG] ❌ Skipped: Receiver ID "${receiverId}" is not in registered models list:`, registeredModels);
-                return;
-            }
+            if (!registeredModels.includes(receiverId)) return;
             if (registeredModels.includes(senderId)) return;
 
             const modelId = receiverId;
             const userId = senderId;
-            const cacheKey = `${userId}_${modelId}`;
+            
+            // 🛑 CHECK RATE LIMIT (15 Messages / 2 Hour Lock)
+            const limitKey = `${userId}_${modelId}`;
+            if (!userLimits.has(limitKey)) {
+                userLimits.set(limitKey, { count: 0, lockedUntil: 0 });
+            }
+            const userLimitData = userLimits.get(limitKey);
 
+            if (Date.now() < userLimitData.lockedUntil) {
+                console.log(`[DEBUG] User ${userId} is currently LOCKED out for 2 hours. Ignoring message.`);
+                return; // User lock hai, koi reply nahi dena
+            }
+
+            // Increase message count
+            userLimitData.count++;
+            console.log(`[DEBUG] Message Count for ${userId} to ${modelId}: ${userLimitData.count}/15`);
+
+            // If 15th message reached, send goodbye and lock
+            if (userLimitData.count >= 15) {
+                userLimitData.lockedUntil = Date.now() + (2 * 60 * 60 * 1000); // Lock for 2 hours
+                userLimitData.count = 0; // Reset count
+                userLimits.set(limitKey, userLimitData);
+
+                const goodbyeMessages = [
+                    "Suno, mujhe thoda kaam aa gaya hai. Main aapse 2-3 ghante baad baat karti hoon, theek hai? ❤️",
+                    "Baby main thodi der ke liye offline jaa rahi hoon, baad mein milti hoon. Love you! 😘",
+                    "Mummy bula rahi hain, mujhe jana padega. Thodi der baad msg karti hoon pakka 🥺"
+                ];
+                const finalMsg = getRandomItem(goodbyeMessages);
+
+                setTimeout(async () => {
+                    await db.collection("messages").add({
+                        senderId: String(modelId), receiverId: String(userId),
+                        sender: String(modelId), receiver: String(userId),
+                        text: finalMsg, message: finalMsg, type: "text",
+                        read: false, isRead: false,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(), time: Date.now()
+                    });
+                }, 2000);
+
+                console.log(`[${getTimestamp()}] 🔒 User ${userId} locked for 2 hours. Final msg sent.`);
+                return; // Stop further processing to Groq API
+            }
+
+            // Normal processing flow below...
+            userLimits.set(limitKey, userLimitData);
+
+            const cacheKey = `${userId}_${modelId}`;
             if (!chatHistoryCache.has(cacheKey)) {
                 chatHistoryCache.set(cacheKey, []);
             }
@@ -203,7 +265,7 @@ db.collection("messages").onSnapshot(async (snapshot) => {
 
                 const apiMessages = [
                     { role: "system", content: getSystemPrompt(modelId) },
-                    ...history
+                    ...history.slice(-10) // Keeping memory short to avoid token overflow
                 ];
 
                 const response = await fetch(GROQ_URL, {
@@ -213,9 +275,9 @@ db.collection("messages").onSnapshot(async (snapshot) => {
                         'Content-Type': 'application/json' 
                     },
                     body: JSON.stringify({ 
-                        model: "llama-3.3-70b-versatile", // ✅ Updated Model
+                        model: "llama-3.3-70b-versatile",
                         messages: apiMessages,
-                        temperature: 0.7,
+                        temperature: 0.8, // Slightly increased for more random/natural replies
                         max_tokens: 150
                     })
                 });
@@ -226,9 +288,6 @@ db.collection("messages").onSnapshot(async (snapshot) => {
                 if (response.ok && result.choices && result.choices.length > 0 && result.choices[0].message) {
                     aiReply = result.choices[0].message.content;
                 } else {
-                    console.error(`[${getTimestamp()}] ❌ Groq API Error Response:`, JSON.stringify(result));
-                    
-                    // SENDING EXACT API ERROR TO MESSAGE INSTEAD OF FALLBACK
                     const errorMessage = result.error?.message || JSON.stringify(result) || "Unknown API Error";
                     aiReply = `[Groq API Error]: ${errorMessage}`;
                 }
@@ -253,28 +312,6 @@ db.collection("messages").onSnapshot(async (snapshot) => {
 
             } catch (err) {
                 console.error(`[${getTimestamp()}] ❌ Exception during AI Reply Handler: ${err.message}`);
-                
-                // SENDING EXACT SYSTEM ERROR TO MESSAGE INSTEAD OF FALLBACK
-                const exactErrorMsg = `[System Error]: ${err.message}`;
-                
-                try {
-                    await db.collection("messages").add({
-                        senderId: String(modelId),
-                        receiverId: String(userId),
-                        sender: String(modelId),
-                        receiver: String(userId),
-                        text: exactErrorMsg,
-                        message: exactErrorMsg,
-                        type: "text",
-                        read: false,
-                        isRead: false,
-                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-                        time: Date.now()
-                    });
-                    console.log(`[${getTimestamp()}] ⚠️ Exact Error Message sent from ${modelId} to ${userId}: "${exactErrorMsg}"`);
-                } catch (dbErr) {
-                    console.error(`[${getTimestamp()}] ❌ Failed to write error message to DB: ${dbErr.message}`);
-                }
             }
         }
     });
